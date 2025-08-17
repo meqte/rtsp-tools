@@ -28,6 +28,7 @@ class RTSPStreamMonitor(threading.Thread):
         self.last_fps_check_time = time.time()
         
         self.logger = logging.getLogger(self.display_alias)
+        # 保持 logger 的级别为 INFO，确保所有消息都能被处理
         self.logger.setLevel(logging.INFO)
         for handler in list(self.logger.handlers):
             self.logger.removeHandler(handler)
@@ -37,6 +38,8 @@ class RTSPStreamMonitor(threading.Thread):
         log_filename = f"{self.log_alias}.log"
         log_filepath = os.path.join(log_path, log_filename)
         file_handler = logging.FileHandler(log_filepath, encoding='utf-8')
+        # 在这里设置文件处理器的级别为 WARNING
+        file_handler.setLevel(logging.ERROR)
         file_formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
         file_handler.setFormatter(file_formatter)
         self.logger.addHandler(file_handler)
@@ -56,7 +59,7 @@ class RTSPStreamMonitor(threading.Thread):
                 
             ret, _ = self.cap.read()
             if not ret:
-                self._log(logging.WARNING, "连接成功但无法读取第一帧，可能流已断开或URL无效。")
+                self._log(logging.ERROR, "连接成功但无法读取第一帧，可能流已断开或URL无效。")
                 self.disconnect()
                 return False
             
@@ -80,11 +83,17 @@ class RTSPStreamMonitor(threading.Thread):
             self.file_handler.close()
             
     def run(self):
+
         self._log(logging.INFO, "监控线程启动...")
         reconnect_delays = [1, 5, 10, 30, 60]
         reconnect_attempt_index = 0
         sleep_interval = self.monitor_interval_ms / 1000.0
 
+        # 在进入主循环前，先尝试进行首次连接
+        if not self.connect():
+            self._log(logging.ERROR, f"首次连接失败，将在 {reconnect_delays[0]} 秒后重试...")
+            self.stop_event.wait(reconnect_delays[0])
+            
         while not self.stop_event.is_set():
             if not self.cap or not self.cap.isOpened():
                 self._log(logging.WARNING, "连接断开或未建立，正在尝试重新连接...")
@@ -94,6 +103,7 @@ class RTSPStreamMonitor(threading.Thread):
                     delay = reconnect_delays[min(reconnect_attempt_index, len(reconnect_delays) - 1)]
                     self._log(logging.ERROR, f"连接失败，将在 {delay} 秒后重试...")
                     self.stop_event.wait(delay)
+                    reconnect_attempt_index += 1  # 增加这一行，递增重试计数器
                     continue
 
             if self.cap.grab():
@@ -180,12 +190,12 @@ class StressTestFrame(ttk.Frame):
         
         ttk.Label(control_frame, text="监控间隔 (ms):").grid(row=1, column=0, padx=5, pady=5, sticky='w')
         self.interval_entry = ttk.Entry(control_frame, width=10)
-        self.interval_entry.insert(0, "1000")
+        self.interval_entry.insert(0, "200")
         self.interval_entry.grid(row=1, column=1, padx=5, pady=5, sticky='w')
         
         ttk.Label(control_frame, text="帧率统计间隔 (s):").grid(row=1, column=2, padx=5, pady=5, sticky='w')
         self.fps_interval_entry = ttk.Entry(control_frame, width=5)
-        self.fps_interval_entry.insert(0, "30.0")
+        self.fps_interval_entry.insert(0, "1.0")
         self.fps_interval_entry.grid(row=1, column=3, padx=5, pady=5, sticky='w')
 
         self.batch_add_button = ttk.Button(control_frame, text="批量添加", command=self.open_batch_add_window)
@@ -409,7 +419,7 @@ class StressTestFrame(ttk.Frame):
             
             for i in range(1, count + 1):
                 self.thread_counter += 1
-                display_alias = f"线程-{self.thread_counter}"
+                display_alias = f"线程-{self.thread_counter:02d}"
                 log_alias = f"{log_alias_base}_{self.thread_counter}"
                 
                 stop_event = threading.Event()
