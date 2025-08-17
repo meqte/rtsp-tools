@@ -127,3 +127,19 @@ Bash
 Bash
 
 `pyinstaller --onefile --noconsole main.py`
+
+-------------------------------------------------------------------------------
+以下是将所有这些选项结合起来的完整命令：
+
+pyinstaller --onefile --noconsole --name "PingTool" --icon "your_icon.ico" main.py
+
+命令参数详解：
+
+--onefile: 将所有文件打包成一个独立的 .exe 文件。
+
+--noconsole: 打包一个没有控制台窗口的应用程序（对于 GUI 应用很重要）。
+
+--name "PingTool": 重命名打包后的可执行文件。 在 dist 文件夹中，生成的文件将不再是 main.exe，而是 PingTool.exe。
+
+--icon "your_icon.ico": 设置应用程序的图标。 你需要将 "your_icon.ico" 替换为你自己的 .ico 图标文件的路径。请注意，PyInstaller 只支持 .ico 格式的图标文件。main.py: 你的主 Python 脚本文件名。
+
