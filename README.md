@@ -133,6 +133,9 @@ Bash
 
 pyinstaller --onefile --noconsole --name "PingTool" --icon "your_icon.ico" main.py
 
+或者增加ico图标
+pyinstaller --onefile --noconsole --name "JACK-2025-工具箱" --icon "tmp/ico.ico" main.py
+
 命令参数详解：
 
 --onefile: 将所有文件打包成一个独立的 .exe 文件。
