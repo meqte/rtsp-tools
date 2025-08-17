@@ -134,7 +134,8 @@ Bash
 pyinstaller --onefile --noconsole --name "PingTool" --icon "your_icon.ico" main.py
 
 或者增加ico图标
-pyinstaller --onefile --noconsole --name "JACK-2025-工具箱" --icon "tmp/ico.ico" main.py
+
+pyinstaller --onefile --noconsole --name "JACK-2025-工具箱" --icon "tmp/ico.ico" --add-data "tmp;tmp" main.py
 
 命令参数详解：
 
