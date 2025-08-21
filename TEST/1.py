@@ -3,33 +3,38 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, Toplevel
 import threading
 import os
-import cv2
 import time
 import re
 import logging
-import asyncio
 import queue
 import logging.handlers
 from collections import defaultdict
+import psutil
+import av
 
 # ==============================================================================
 # 全局状态管理
 # ==============================================================================
-# 主事件循环
-event_loop = None
-# 异步任务列表
-async_tasks = []
-# 用于停止所有异步任务的信号
-stop_event = threading.Event()
-# 状态更新队列，用于主线程与异步任务通信
+# 全局字典，用于存储每个线程的状态队列
 STATUS_QUEUES = defaultdict(queue.Queue)
-# 日志队列，用于异步任务与主线程通信
+# 日志队列，用于子线程与主线程通信
 LOG_QUEUE = queue.Queue()
+# 存储每个地址的汇总数据
+AGGREGATED_DATA = defaultdict(lambda: {
+    'threads_count': 0,
+    'total_frames': 0,
+    'total_bytes': 0,
+    'total_reconnects': 0,
+    'total_expected_frames': 0,
+    'total_lost_frames': 0,
+    'fps_list': [],
+    'latency_list': [],
+})
 
 # ==============================================================================
 # 日志配置
 # ==============================================================================
-class AsyncioLogHandler(logging.Handler):
+class ThreadSafeLogHandler(logging.Handler):
     """一个线程安全的日志处理器，将日志消息放入队列。"""
     def __init__(self, log_queue):
         super().__init__()
@@ -41,267 +46,293 @@ class AsyncioLogHandler(logging.Handler):
         except queue.Full:
             pass
 
+# 设置日志等级为DEBUG，以便显示所有详细信息
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger().addHandler(ThreadSafeLogHandler(LOG_QUEUE))
+
 # ==============================================================================
-# 异步视频流监控协程
+# 多线程视频流监控
 # ==============================================================================
-async def monitor_stream(url, thread_id, tree_item_id, delay_s, protocol, loop):
-    logger = logging.getLogger(f"monitor-{thread_id}")
-    logger.setLevel(logging.DEBUG)
-
-    def _update_status(status, connect_latency=None, total=None, valid=None, dropped=None, drop_rate=None):
-        status_info = {
-            'thread_id': thread_id,
-            'item_id': tree_item_id,
-            'status': status,
-            'connect_latency': f"{connect_latency:.2f}" if connect_latency is not None else 'N/A',
-            'total_frames_count': total if total is not None else 'N/A',
-            'valid_frames_count': valid if valid is not None else 'N/A',
-            'dropped_frames_count': dropped if dropped is not None else 'N/A',
-            'drop_rate': f"{drop_rate:.2f}%" if drop_rate is not None else 'N/A',
-        }
-        try:
-            if thread_id in STATUS_QUEUES:
-                STATUS_QUEUES[thread_id].put_nowait(status_info)
-        except queue.Full:
-            pass
-
-    cap = None
-    # 最终修复：仅通过在 URL 中显式指定传输协议来解决兼容性问题
-    rtsp_url = url
-    if protocol == 'TCP':
-        if '?' in rtsp_url:
-            rtsp_url += "&rtsp_transport=tcp"
-        else:
-            rtsp_url += "?rtsp_transport=tcp"
-    elif protocol == 'UDP':
-        if '?' in rtsp_url:
-            rtsp_url += "&rtsp_transport=udp"
-        else:
-            rtsp_url += "?rtsp_transport=udp"
-
-    try:
-        _update_status("连接中...")
-        logger.debug(f"尝试连接: {rtsp_url} (协议: {protocol})")
+class RTSPStreamMonitor(threading.Thread):
+    def __init__(self, url, thread_id, tree_item_id, protocol='UDP', expected_fps=25):
+        super().__init__()
+        self.url = url
+        self.thread_id = thread_id
+        self.tree_item_id = tree_item_id
+        self.protocol = protocol
+        self.expected_fps = expected_fps
+        self.stop_event = threading.Event()
+        self.container = None
+        self.logger = logging.getLogger(f"Stream-{self.thread_id:02d}")
         
-        # 使用 run_in_executor 避免阻塞事件循环
-        start_time = time.time()
-        # 移除 cap.set()，仅依赖 URL 参数
-        cap = await loop.run_in_executor(None, lambda: cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG))
-        connect_latency = time.time() - start_time
+        # 累积统计变量
+        self.total_frames = 0
+        self.total_bytes = 0
+        self.reconnect_count = 0
         
-        if not cap.isOpened():
-            logger.error("连接失败：无法打开视频流。")
-            _update_status("连接失败", connect_latency)
-            return
-            
-        logger.info(f"连接成功！耗时: {connect_latency:.2f} 秒。")
+        # 实时指标变量
+        self.current_fps = 0
+        self.connect_latency = 0.0
+        self.last_frame_time = time.time()
         
-        total_frames = 0
-        valid_frames = 0
-
-        while not stop_event.is_set():
-            total_frames += 1
-            
-            # 使用 run_in_executor 异步调用阻塞方法
-            ret = await loop.run_in_executor(None, cap.grab)
-            
-            if ret:
-                valid_frames += 1
-                dropped_frames = total_frames - valid_frames
-                drop_rate = (dropped_frames / total_frames) * 100 if total_frames > 0 else 0
+    def run(self):
+        while not self.stop_event.is_set():
+            try:
+                self.logger.info(f"正在尝试连接: {self.url}...")
+                start_time = time.time()
                 
-                if valid_frames % 100 == 0:
-                    logger.debug(f"成功抓取 {valid_frames} 帧。")
-                    
-                _update_status("正常", connect_latency, total_frames, valid_frames, dropped_frames, drop_rate)
-            else:
-                logger.error(f"抓取帧失败，可能连接已断开，正在准备退出...")
-                _update_status("抓取失败", connect_latency, total_frames, valid_frames, total_frames-valid_frames, 100)
-                break
-            
-            await asyncio.sleep(delay_s)
+                # 使用 PyAV 打开流，动态获取帧率
+                options = {'rtsp_transport': self.protocol.lower(), 'buffer_size': '2048000', 'timeout': '5000000'}
+                self.container = av.open(self.url, mode='r', options=options)
+                
+                # 尝试获取视频流的真实帧率
+                try:
+                    video_stream = self.container.streams.video[0]
+                    self.expected_fps = float(video_stream.average_rate)
+                    self.logger.info(f"成功获取到流的真实帧率：{self.expected_fps:.2f} FPS")
+                except (IndexError, AttributeError):
+                    self.logger.warning(f"无法获取视频流的真实帧率，将使用默认值 {self.expected_fps} FPS。")
 
-    except asyncio.CancelledError:
-        logger.info("任务已取消。")
-        _update_status("已停止")
-    except Exception as e:
-        logger.error(f"发生异常: {e}")
-        _update_status("发生异常")
-    finally:
-        if cap and cap.isOpened():
-            cap.release()
-            logger.info("连接已断开。")
+                self.connect_latency = time.time() - start_time
+                self.logger.info(f"连接成功！延迟: {self.connect_latency:.2f}s。开始抓取帧。")
+
+                # 遍历数据包
+                for packet in self.container.demux(video=0):
+                    if self.stop_event.is_set():
+                        break
+                    
+                    self.total_frames += 1
+                    self.total_bytes += packet.size if packet else 0
+                    
+                    # 实时帧率计算
+                    current_time = time.time()
+                    elapsed_time = current_time - self.last_frame_time
+                    if elapsed_time > 0:
+                        self.current_fps = 1 / elapsed_time
+                    self.last_frame_time = current_time
+
+                    # 预计帧数和丢失帧数计算
+                    total_elapsed_time = current_time - start_time
+                    expected_frames = int(total_elapsed_time * self.expected_fps)
+                    lost_frames = max(0, expected_frames - self.total_frames)
+
+                    status_info = {
+                        'thread_id': self.thread_id,
+                        'item_id': self.tree_item_id,
+                        'status': "正常",
+                        'total_frames': self.total_frames,
+                        'received_frames': self.total_frames,
+                        'total_bytes': self.total_bytes,
+                        'reconnect_count': self.reconnect_count,
+                        'connect_latency': self.connect_latency,
+                        'current_fps': self.current_fps,
+                        'expected_frames': expected_frames,
+                        'lost_frames': lost_frames,
+                    }
+                    if self.thread_id in STATUS_QUEUES:
+                        STATUS_QUEUES[self.thread_id].put(status_info)
+                    
+                    time.sleep(0.001) # 避免忙循环
+                
+            except (av.AVError, TimeoutError) as e:
+                self.reconnect_count += 1
+                self.logger.error(f"连接或拉流失败: {e}。第 {self.reconnect_count} 次重试中...")
+                status_info = {
+                    'thread_id': self.thread_id,
+                    'item_id': self.tree_item_id,
+                    'status': f"连接失败 (重试{self.reconnect_count})",
+                    'total_frames': self.total_frames,
+                    'received_frames': self.total_frames,
+                    'total_bytes': self.total_bytes,
+                    'reconnect_count': self.reconnect_count,
+                    'connect_latency': 0.0,
+                    'current_fps': 0.0,
+                    'expected_frames': 0,
+                    'lost_frames': 0,
+                }
+                if self.thread_id in STATUS_QUEUES:
+                    STATUS_QUEUES[self.thread_id].put(status_info)
+                time.sleep(5)  # 等待5秒后重试
+            except Exception as e:
+                self.logger.error(f"发生未知异常: {e}")
+                time.sleep(5)
+            finally:
+                if self.container:
+                    try:
+                        self.container.close()
+                    except Exception:
+                        pass
+                self.container = None
+
+        self.logger.info("监控线程已停止。")
+        
+    def stop(self):
+        self.stop_event.set()
+        
+# ==============================================================================
+# 系统性能监控线程
+# ==============================================================================
+class SystemMonitor(threading.Thread):
+    def __init__(self, tree_item_id):
+        super().__init__()
+        self.tree_item_id = tree_item_id
+        self.stop_event = threading.Event()
+        self.logger = logging.getLogger("SysMonitor")
+        self.p = psutil.Process(os.getpid())
+        self.last_net_stats = psutil.net_io_counters()
+
+    def run(self):
+        while not self.stop_event.is_set():
+            try:
+                cpu_percent = self.p.cpu_percent(interval=None)
+                mem_info = self.p.memory_info()
+                
+                current_net_stats = psutil.net_io_counters()
+                net_sent = current_net_stats.bytes_sent - self.last_net_stats.bytes_sent
+                net_recv = current_net_stats.bytes_recv - self.last_net_stats.bytes_recv
+                self.last_net_stats = current_net_stats
+                
+                status_info = {
+                    'thread_id': -1, # 使用特殊ID
+                    'item_id': self.tree_item_id,
+                    'status': "正常",
+                    'cpu_percent': f"{cpu_percent:.2f}",
+                    'memory_usage_mb': f"{mem_info.rss / (1024 * 1024):.2f}",
+                    'net_sent_mb': f"{net_sent / (1024 * 1024):.2f}",
+                    'net_recv_mb': f"{net_recv / (1024 * 1024):.2f}",
+                }
+                if -1 in STATUS_QUEUES:
+                    STATUS_QUEUES[-1].put(status_info)
+                
+                time.sleep(1) # 每秒更新一次
+                
+            except Exception as e:
+                self.logger.error(f"系统监控发生异常: {e}")
+                time.sleep(5)
+                
+        self.logger.info("系统监控线程已停止。")
+        
+    def stop(self):
+        self.stop_event.set()
 
 # ==============================================================================
-# GUI 框架
+# GUI 应用类
 # ==============================================================================
 class StressTestFrame(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
         self.url_list_data = {}
         self.url_counter = 0
-        
-        # 日志配置
-        logging.basicConfig(level=logging.INFO)
-        log_format = logging.Formatter("[%(asctime)s] [%(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-        log_handler = AsyncioLogHandler(LOG_QUEUE)
-        log_handler.setFormatter(log_format)
-        logging.getLogger().addHandler(log_handler)
+        self.monitor_threads = []
+        self.summary_row_ids = {}
         
         self.create_widgets()
         self.update_statuses()
-
-    def update_statuses(self):
-        # 处理状态更新
-        try:
-            for thread_id, status_queue in STATUS_QUEUES.items():
-                while not status_queue.empty():
-                    status_info = status_queue.get_nowait()
-                    item_id = status_info['item_id']
-                    if self.tree.exists(item_id):
-                        status = status_info['status']
-                        is_abnormal = status in ["连接失败", "抓取失败", "已断开", "发生异常"]
-                        
-                        if is_abnormal:
-                            self.tree.item(item_id, tags=('abnormal',))
-                        else:
-                            self.tree.item(item_id, tags=())
-
-                        self.tree.set(item_id, 'status', status)
-                        self.tree.set(item_id, 'connect_latency', status_info.get('connect_latency', 'N/A'))
-                        self.tree.set(item_id, 'total_frames_count', status_info.get('total_frames_count', 'N/A'))
-                        self.tree.set(item_id, 'valid_frames_count', status_info.get('valid_frames_count', 'N/A'))
-                        self.tree.set(item_id, 'dropped_frames_count', status_info.get('dropped_frames_count', 'N/A'))
-                        self.tree.set(item_id, 'drop_rate', status_info.get('drop_rate', 'N/A'))
-        except Exception as e:
-            print(f"Error in status updater: {e}")
-
-        # 处理日志更新
-        try:
-            while not LOG_QUEUE.empty():
-                message = LOG_QUEUE.get_nowait()
-                self.log_text.configure(state='normal')
-                self.log_text.insert(tk.END, f"{message}\n")
-                self.log_text.configure(state='disabled')
-                self.log_text.see(tk.END)
-        except Exception as e:
-            print(f"Error in log updater: {e}")
-
-        self.after(200, self.update_statuses)
-
-    def bind_right_click_menu(self, widget):
-        def show_menu(event):
-            menu = tk.Menu(widget, tearoff=0)
-            menu.add_command(label="剪切", command=lambda: widget.event_generate("<<Cut>>"))
-            menu.add_command(label="复制", command=lambda: widget.event_generate("<<Copy>>"))
-            menu.add_command(label="粘贴", command=lambda: widget.event_generate("<<Paste>>"))
-            menu.post(event.x_root, event.y_root)
-        widget.bind("<Button-3>", show_menu)
         
     def create_widgets(self):
+        self.rowconfigure(2, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        # 顶部输入和控制
         control_frame = ttk.Frame(self, padding="10")
-        control_frame.pack(fill=tk.X)
+        control_frame.grid(row=0, column=0, sticky='ew')
+        control_frame.columnconfigure(1, weight=1)
 
         ttk.Label(control_frame, text="RTSP 地址:").grid(row=0, column=0, padx=5, pady=5, sticky='w')
         self.url_entry = ttk.Entry(control_frame, width=50)
         self.url_entry.insert(0, "rtsp://192.168.0.3/live/1/1")
         self.url_entry.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
 
-        ttk.Label(control_frame, text="线程:").grid(row=0, column=2, padx=5, pady=5, sticky='w')
-        self.threads_combobox = ttk.Combobox(control_frame, width=4, values=list(range(1, 11)))
+        ttk.Label(control_frame, text="线程数:").grid(row=0, column=2, padx=5, pady=5, sticky='w')
+        self.threads_combobox = ttk.Combobox(control_frame, width=5, values=list(range(1, 11)) + [20, 40, 60, 100], state="readonly")
         self.threads_combobox.set("1")
         self.threads_combobox.grid(row=0, column=3, padx=5, pady=5)
         
-        ttk.Label(control_frame, text="延迟(秒):").grid(row=1, column=0, padx=5, pady=5, sticky='w')
-        self.delay_combobox = ttk.Combobox(control_frame, width=4, values=list(range(1, 11)))
-        self.delay_combobox.set("1")
-        self.delay_combobox.grid(row=1, column=1, padx=5, pady=5, sticky='w')
-
-        ttk.Label(control_frame, text="协议:").grid(row=1, column=2, padx=5, pady=5, sticky='w')
-        self.protocol_combobox = ttk.Combobox(control_frame, width=4, values=['TCP', 'UDP'])
+        ttk.Label(control_frame, text="协议:").grid(row=0, column=4, padx=5, pady=5, sticky='w')
+        self.protocol_combobox = ttk.Combobox(control_frame, width=4, values=['UDP', 'TCP'], state="readonly")
         self.protocol_combobox.set("UDP")
-        self.protocol_combobox.grid(row=1, column=3, padx=5, pady=5)
-        
-        self.add_button = ttk.Button(control_frame, text="添加地址", command=self.add_url)
-        self.add_button.grid(row=0, column=4, padx=5, pady=5)
+        self.protocol_combobox.grid(row=0, column=5, padx=5, pady=5, sticky='w')
+
+        self.add_button = ttk.Button(control_frame, text="添加", command=self.add_url)
+        self.add_button.grid(row=0, column=6, padx=5, pady=5)
         
         self.batch_add_button = ttk.Button(control_frame, text="批量添加", command=self.open_batch_add_window)
-        self.batch_add_button.grid(row=0, column=5, padx=5, pady=5)
-
-        control_frame.columnconfigure(1, weight=1)
-
-        self.bind_right_click_menu(self.url_entry)
+        self.batch_add_button.grid(row=0, column=7, padx=5, pady=5)
         
-        ttk.Label(self, text="待监控地址列表:").pack(pady=(10, 0), padx=10, anchor='w')
-        self.address_frame = ttk.Frame(self, relief=tk.GROOVE, borderwidth=1, height=150)
-        self.address_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        self.address_frame.pack_propagate(False)
-
-        self.tree = ttk.Treeview(self.address_frame, columns=('index', 'url', 'status', 'total_frames_count', 'valid_frames_count', 'dropped_frames_count', 'drop_rate', 'connect_latency'), show='headings')
-        self.tree.tag_configure('abnormal', foreground='red')
-
-        self.tree.heading('index', text='序号', anchor='center')
+        self.clear_button = ttk.Button(control_frame, text="清空", command=self.clear_list)
+        self.clear_button.grid(row=0, column=8, padx=5, pady=5)
+        
+        # 中间表格展示区
+        ttk.Label(self, text="待监控地址列表:").grid(row=1, column=0, padx=10, pady=(10, 0), sticky='w')
+        self.address_frame = ttk.Frame(self, relief=tk.GROOVE, borderwidth=1)
+        self.address_frame.grid(row=2, column=0, sticky='nsew', padx=10, pady=5)
+        self.address_frame.columnconfigure(0, weight=1)
+        self.address_frame.rowconfigure(0, weight=1)
+        
+        columns = ('threads', 'url', 'status', 'fps', 'received_frames', 'expected_frames', 'lost_frames', 'lost_rate', 'total_bytes', 'reconnects', 'latency')
+        self.tree = ttk.Treeview(self.address_frame, columns=columns, show='headings')
+        self.tree.heading('threads', text='线程', anchor='center')
         self.tree.heading('url', text='RTSP 地址', anchor='w')
         self.tree.heading('status', text='状态', anchor='center')
-        self.tree.heading('total_frames_count', text='总尝试数', anchor='center')
-        self.tree.heading('valid_frames_count', text='总接收数', anchor='center')
-        self.tree.heading('dropped_frames_count', text='总丢失数', anchor='center')
-        self.tree.heading('drop_rate', text='丢帧率', anchor='center')
-        self.tree.heading('connect_latency', text='耗时', anchor='center')
+        self.tree.heading('fps', text='实时FPS', anchor='center')
+        self.tree.heading('received_frames', text='有效帧', anchor='center')
+        self.tree.heading('expected_frames', text='预计帧', anchor='center')
+        self.tree.heading('lost_frames', text='丢失帧', anchor='center')
+        self.tree.heading('lost_rate', text='丢失率', anchor='center')
+        self.tree.heading('total_bytes', text='总流量', anchor='center')
+        self.tree.heading('reconnects', text='重连次数', anchor='center')
+        self.tree.heading('latency', text='连接延迟', anchor='center')
         
-        self.tree.column('index', width=40, anchor='center', stretch=False)
-        self.tree.column('url', minwidth=120, anchor='w', stretch=True) 
-        self.tree.column('status', width=60, anchor='center', stretch=False)
-        self.tree.column('total_frames_count', width=60, anchor='center', stretch=False)
-        self.tree.column('valid_frames_count', width=60, anchor='center', stretch=False)
-        self.tree.column('dropped_frames_count', width=60, anchor='center', stretch=False)
-        self.tree.column('drop_rate', width=60, anchor='center', stretch=False)
-        self.tree.column('connect_latency', width=40, anchor='center', stretch=False)
+        self.tree.column('threads', width=40, anchor='center', stretch=False)
+        self.tree.column('url', minwidth=200, anchor='w', stretch=True) 
+        self.tree.column('status', width=120, anchor='center', stretch=False)
+        self.tree.column('fps', width=80, anchor='center', stretch=False)
+        self.tree.column('received_frames', width=80, anchor='center', stretch=False)
+        self.tree.column('expected_frames', width=80, anchor='center', stretch=False)
+        self.tree.column('lost_frames', width=80, anchor='center', stretch=False)
+        self.tree.column('lost_rate', width=80, anchor='center', stretch=False)
+        self.tree.column('total_bytes', width=100, anchor='center', stretch=False)
+        self.tree.column('reconnects', width=80, anchor='center', stretch=False)
+        self.tree.column('latency', width=80, anchor='center', stretch=False)
         
-        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.grid(row=0, column=0, sticky='nsew')
 
         self.tree_scrollbar = ttk.Scrollbar(self.address_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=self.tree_scrollbar.set)
-        self.tree_scrollbar.pack(side="right", fill="y")
+        self.tree_scrollbar.grid(row=0, column=1, sticky='ns')
         
         self.tree.bind("<Button-3>", self.show_tree_context_menu)
         
+        # 底部控制和状态
         bottom_frame = ttk.Frame(self, padding="10")
-        bottom_frame.pack(fill=tk.X, pady=(0, 10))
+        bottom_frame.grid(row=3, column=0, sticky='ew')
+        bottom_frame.columnconfigure(1, weight=1)
 
         self.start_button = ttk.Button(bottom_frame, text="启动监控", command=self.start_monitoring)
-        self.start_button.pack(side=tk.LEFT, padx=5)
+        self.start_button.grid(row=0, column=0, padx=5)
 
         self.stop_button = ttk.Button(bottom_frame, text="停止监控", command=self.stop_monitoring, state=tk.DISABLED)
-        self.stop_button.pack(side=tk.LEFT, padx=5)
+        self.stop_button.grid(row=0, column=1, padx=5)
         
-        self.clear_button = ttk.Button(bottom_frame, text="清空列表", command=self.clear_list)
-        self.clear_button.pack(side=tk.LEFT, padx=5)
-
-        self.status_label = ttk.Label(bottom_frame, text="", foreground="blue")
-        self.status_label.pack(side=tk.LEFT, padx=10)
+        self.status_label = ttk.Label(bottom_frame, text="已停止", foreground="blue")
+        self.status_label.grid(row=0, column=2, padx=10)
         
-        self.progress_bar = ttk.Progressbar(bottom_frame, mode='determinate', length=100)
-        self.progress_bar.pack(side=tk.LEFT, padx=10, pady=5, expand=True, fill=tk.X)
-        self.progress_bar.pack_forget()
+        # 性能监控面板 (在同一行显示)
+        self.sys_monitor_label = ttk.Label(bottom_frame, text="CPU: 0.00% | 内存: 0.00 MB | 网络: ↓0.00MB/s ↑0.00MB/s")
+        self.sys_monitor_label.grid(row=0, column=3, padx=10, sticky='e')
 
-        ttk.Label(self, text="日志输出:").pack(pady=(0, 5), padx=10, anchor='w')
-        self.log_text = scrolledtext.ScrolledText(self, height=25, state='disabled', wrap=tk.WORD, font=('Courier', 10))
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        # 日志输出区
+        ttk.Label(self, text="日志输出:").grid(row=4, column=0, padx=10, pady=(0, 5), sticky='w')
+        self.log_text = scrolledtext.ScrolledText(self, height=15, state='disabled', wrap=tk.WORD, font=('Courier', 10))
+        self.log_text.grid(row=5, column=0, sticky='nsew', padx=10, pady=(0, 10))
 
     def show_tree_context_menu(self, event):
         item = self.tree.identify_row(event.y)
-        if item:
+        if item and item not in self.summary_row_ids.values():
             self.tree.selection_set(item)
             menu = tk.Menu(self.tree, tearoff=0)
-            menu.add_command(label="复制地址", command=lambda: self.copy_tree_url(item))
             menu.add_command(label="移除", command=lambda: self.remove_url(item))
             menu.post(event.x_root, event.y_root)
-
-    def copy_tree_url(self, item_id):
-        url = self.tree.item(item_id, 'values')[1]
-        self.clipboard_clear()
-        self.clipboard_append(url)
 
     def open_batch_add_window(self):
         batch_window = Toplevel(self.winfo_toplevel())
@@ -316,21 +347,14 @@ class StressTestFrame(ttk.Frame):
         
         batch_text = scrolledtext.ScrolledText(frame, wrap=tk.WORD, height=10)
         batch_text.pack(fill=tk.BOTH, expand=True)
-        self.bind_right_click_menu(batch_text)
-        
-        default_urls = """rtsp://192.168.0.3/live/1/1
-rtsp://127.0.0.1:8080/live/1/8"""
-        batch_text.insert(tk.END, default_urls)
         
         def save_and_close():
             urls = batch_text.get("1.0", tk.END).strip().split('\n')
-            
             for url in urls:
                 url = url.strip()
                 if not url:
                     continue
                 self.add_url(url=url)
-
             batch_window.destroy()
 
         save_button = ttk.Button(frame, text="确认添加", command=save_and_close)
@@ -343,57 +367,125 @@ rtsp://127.0.0.1:8080/live/1/8"""
         if not url:
             messagebox.showerror("错误", "RTSP 地址不能为空！")
             return
-
+            
         self.url_counter += 1
-        item_id = self.tree.insert('', tk.END, values=(self.url_counter, url, "未启动", "N/A", "N/A", "N/A", "N/A", "N/A"))
+        item_id = self.tree.insert('', tk.END, values=(0, url, "未启动", "0", "0", "0", "0", "0", "0", "0", "N/A"))
         
+        # 插入汇总行
+        summary_row_id = self.tree.insert(item_id, tk.END, tags=('summary',))
+        self.summary_row_ids[item_id] = summary_row_id
+        self.tree.tag_configure('summary', background='#e0e0e0', font=('TkDefaultFont', 9, 'bold'))
+
         self.url_list_data[item_id] = {
             'url': url,
             'list_index': self.url_counter,
+            'summary_row_id': summary_row_id,
         }
         self.url_entry.delete(0, tk.END)
 
     def remove_url(self, item_id):
         if messagebox.askyesno("确认移除", "确定要移除此项吗？"):
             if item_id in self.url_list_data:
+                # 移除汇总行
+                self.tree.delete(self.url_list_data[item_id]['summary_row_id'])
                 del self.url_list_data[item_id]
             self.tree.delete(item_id)
             self._update_tree_indices()
 
     def _update_tree_indices(self):
-        items = self.tree.get_children()
+        items = [item for item in self.tree.get_children('') if item not in self.summary_row_ids.values()]
         for i, item in enumerate(items):
+            self.tree.set(item, 'threads', 0) # 修正为0
+            self.tree.set(item, 'url', self.url_list_data[item]['url'])
+            self.tree.set(item, 'status', "未启动")
             self.tree.set(item, 'index', i + 1)
-            if item in self.url_list_data:
-                self.url_list_data[item]['list_index'] = i + 1
+            self.url_list_data[item]['list_index'] = i + 1
 
     def clear_list(self):
-        self.url_list_data = {}
-        self.url_counter = 0
-        self.tree.delete(*self.tree.get_children())
+        if messagebox.askyesno("确认清空", "确定要清空列表吗？"):
+            self.url_list_data = {}
+            self.url_counter = 0
+            self.tree.delete(*self.tree.get_children())
+            
+    def update_statuses(self):
+        # 处理日志队列
+        while not LOG_QUEUE.empty():
+            log_record = LOG_QUEUE.get_nowait()
+            self.log_text.configure(state='normal')
+            self.log_text.insert(tk.END, log_record + '\n')
+            self.log_text.configure(state='disabled')
+            self.log_text.see(tk.END)
+        
+        # 清空聚合数据
+        for key in AGGREGATED_DATA:
+            AGGREGATED_DATA[key]['fps_list'] = []
+            AGGREGATED_DATA[key]['latency_list'] = []
+            AGGREGATED_DATA[key]['total_bytes'] = 0
+            AGGREGATED_DATA[key]['total_frames'] = 0
+            AGGREGATED_DATA[key]['total_lost_frames'] = 0
+            AGGREGATED_DATA[key]['total_reconnects'] = 0
+            AGGREGATED_DATA[key]['total_expected_frames'] = 0
 
-    # 创建并启动监控任务的异步函数
-    async def _create_and_start_tasks(self, url, threads_count, delay_s, protocol, row_count, event_loop_ref, tree_instance):
-        global async_tasks
+        # 处理状态队列并进行聚合
+        for thread_id, status_queue in STATUS_QUEUES.items():
+            while not status_queue.empty():
+                status_info = status_queue.get_nowait()
+                if thread_id == -1: # 系统监控信息
+                    self.sys_monitor_label.config(text=f"CPU: {status_info['cpu_percent']}% | 内存: {status_info['memory_usage_mb']} MB | 网络: ↓{status_info['net_recv_mb']}MB/s ↑{status_info['net_sent_mb']}MB/s")
+                    continue
+                
+                item_id = status_info['item_id']
+                if self.tree.exists(item_id):
+                    # 更新单个线程行
+                    self.tree.item(item_id, values=(
+                        status_info['thread_id'],
+                        self.url_list_data[item_id]['url'],
+                        status_info['status'],
+                        f"{status_info['current_fps']:.2f}",
+                        status_info['received_frames'],
+                        status_info['expected_frames'],
+                        status_info['lost_frames'],
+                        f"{(status_info['lost_frames'] / status_info['expected_frames']) * 100:.2f}%" if status_info['expected_frames'] > 0 else "0.00%",
+                        f"{status_info['total_bytes'] / (1024*1024):.2f} MB",
+                        status_info['reconnect_count'],
+                        f"{status_info['connect_latency']:.2f}s"
+                    ))
+                    
+                    # 聚合数据
+                    AGGREGATED_DATA[item_id]['threads_count'] += 1
+                    AGGREGATED_DATA[item_id]['total_frames'] += status_info['received_frames']
+                    AGGREGATED_DATA[item_id]['total_bytes'] += status_info['total_bytes']
+                    AGGREGATED_DATA[item_id]['total_reconnects'] += status_info['reconnect_count']
+                    AGGREGATED_DATA[item_id]['total_expected_frames'] += status_info['expected_frames']
+                    AGGREGATED_DATA[item_id]['total_lost_frames'] += status_info['lost_frames']
+                    AGGREGATED_DATA[item_id]['fps_list'].append(status_info['current_fps'])
+                    AGGREGATED_DATA[item_id]['latency_list'].append(status_info['connect_latency'])
         
-        for i in range(1, threads_count + 1):
-            row_count += 1
-            thread_counter = len(async_tasks) + 1 # Use current length for unique ID
-            
-            new_item_id = tree_instance.insert('', tk.END, values=(row_count, url, "正在启动...", "N/A", "N/A", "N/A", "N/A", "N/A"))
-            STATUS_QUEUES[thread_counter] = queue.Queue()
-            
-            task = event_loop_ref.create_task(monitor_stream(
-                url=url,
-                thread_id=thread_counter,
-                tree_item_id=new_item_id,
-                delay_s=delay_s,
-                protocol=protocol,
-                loop=event_loop_ref
-            ))
-            async_tasks.append(task)
-        
-        return row_count
+        # 更新汇总行
+        for item_id, data in AGGREGATED_DATA.items():
+            if item_id in self.url_list_data:
+                summary_row_id = self.url_list_data[item_id]['summary_row_id']
+                
+                # 计算平均值
+                avg_fps = sum(data['fps_list']) / len(data['fps_list']) if data['fps_list'] else 0
+                avg_latency = sum(data['latency_list']) / len(data['latency_list']) if data['latency_list'] else 0
+                total_lost_rate = (data['total_lost_frames'] / data['total_expected_frames']) * 100 if data['total_expected_frames'] > 0 else 0
+
+                self.tree.item(summary_row_id, values=(
+                    f"总数({data['threads_count']})",
+                    "---- 汇总 ----",
+                    "N/A",
+                    f"{avg_fps:.2f}",
+                    data['total_frames'],
+                    data['total_expected_frames'],
+                    data['total_lost_frames'],
+                    f"{total_lost_rate:.2f}%",
+                    f"{data['total_bytes'] / (1024*1024):.2f} MB",
+                    data['total_reconnects'],
+                    f"{avg_latency:.2f}s"
+                ))
+                    
+        self.after(200, self.update_statuses)
 
     def start_monitoring(self):
         if not self.url_list_data:
@@ -410,99 +502,73 @@ rtsp://127.0.0.1:8080/live/1/8"""
         self.log_text.configure(state='normal')
         self.log_text.delete('1.0', tk.END)
         self.log_text.configure(state='disabled')
+        
         logging.info("--- 监控任务启动 ---")
         self.status_label.config(text="监控中...")
-        
-        self.progress_bar.pack(side=tk.LEFT, padx=10, pady=5, expand=True, fill=tk.X)
-        self.progress_bar.stop()
-        
-        global async_tasks
-        global STATUS_QUEUES
-        global stop_event
-        
-        async_tasks = []
+
+        # 清空并重新初始化队列和线程列表
+        self.monitor_threads = []
         STATUS_QUEUES.clear()
-        stop_event.clear()
         
         try:
-            global_threads_count = int(self.threads_combobox.get())
-            if global_threads_count < 1:
-                messagebox.showwarning("警告", "线程数不能小于1，已自动设置为1。")
-                global_threads_count = 1
-            
-            delay_s = int(self.delay_combobox.get())
-            if delay_s < 1:
-                messagebox.showwarning("警告", "延迟时间不能小于1，已自动设置为1。")
-                delay_s = 1
-            
-            protocol = self.protocol_combobox.get()
-            if not protocol in ['TCP', 'UDP']:
-                messagebox.showwarning("警告", "协议选择无效，已自动设置为TCP。")
-                protocol = 'TCP'
-
+            threads_count = int(self.threads_combobox.get())
         except ValueError:
-            messagebox.showwarning("警告", "线程数或延迟时间输入无效，已自动设置为1。")
-            global_threads_count = 1
-            delay_s = 1
-            protocol = 'TCP'
-
-        self.tree.delete(*self.tree.get_children())
-        row_count = 0
+            threads_count = 1
+        protocol = self.protocol_combobox.get()
         
+        # 启动系统监控线程
+        sys_monitor_thread = SystemMonitor(tree_item_id='system_info')
+        self.monitor_threads.append(sys_monitor_thread)
+        STATUS_QUEUES[-1] = queue.Queue()
+        sys_monitor_thread.start()
+
+        # 启动 RTSP 监控线程
+        task_counter = 0
         for item_id, data in self.url_list_data.items():
-            url = data['url']
-            
-            # 使用 call_soon_threadsafe 安全地在 asyncio 线程中创建任务，并传入所有必要参数
-            event_loop.call_soon_threadsafe(
-                asyncio.create_task,
-                self._create_and_start_tasks(
-                    url=url,
-                    threads_count=global_threads_count,
-                    delay_s=delay_s,
-                    protocol=protocol,
-                    row_count=row_count,
-                    event_loop_ref=event_loop,
-                    tree_instance=self.tree
+            self.tree.set(item_id, 'threads', threads_count)
+            for _ in range(threads_count):
+                task_counter += 1
+                thread = RTSPStreamMonitor(
+                    url=data['url'],
+                    thread_id=task_counter,
+                    tree_item_id=item_id,
+                    protocol=protocol
                 )
-            )
+                self.monitor_threads.append(thread)
+                STATUS_QUEUES[task_counter] = queue.Queue()
+                thread.start()
+        
+        logging.info(f"已创建 {len(self.monitor_threads)} 个监控线程。")
 
     def stop_monitoring(self):
-        if not async_tasks:
+        if not self.monitor_threads:
             return
 
         logging.info("--- 正在发送停止信号... ---")
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.DISABLED)
-        self.add_button.config(state=tk.DISABLED)
-        self.batch_add_button.config(state=tk.DISABLED)
-        self.clear_button.config(state=tk.DISABLED)
         
-        self.progress_bar.pack(side=tk.LEFT, padx=10, pady=5, expand=True, fill=tk.X)
-        self.progress_bar.config(mode='indeterminate')
-        self.progress_bar.start(10)
-
-        # 设置停止事件，让所有正在运行的协程在下次循环时优雅退出
-        stop_event.set()
-
-        # 显式取消所有正在运行的任务，以便更快地停止
-        for task in async_tasks:
-            task.cancel()
+        # 向所有线程发送停止信号
+        for thread in self.monitor_threads:
+            thread.stop()
         
-        self.after(100, self._shutdown_worker)
+        # 使用一个线程来等待所有监控线程结束
+        wait_thread = threading.Thread(target=self._wait_for_threads_to_join)
+        wait_thread.start()
 
-    def _shutdown_worker(self):
-        # 检查所有任务是否已完成
-        if any(not task.done() for task in async_tasks):
-            self.after(500, self._shutdown_worker)
-        else:
-            self._on_threads_stopped()
+    def _wait_for_threads_to_join(self):
+        # 等待所有线程完成
+        for thread in self.monitor_threads:
+            thread.join()
+        
+        # 在 GUI 线程中调用收尾函数
+        self.after(100, self._on_threads_stopped)
 
     def _on_threads_stopped(self):
-        global async_tasks
-        async_tasks = []
+        self.monitor_threads = []
         STATUS_QUEUES.clear()
         
-        logging.info("--- 所有监控任务已停止。---")
+        logging.info("--- 所有监控线程已停止。---")
         self.status_label.config(text="已停止")
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
@@ -510,42 +576,24 @@ rtsp://127.0.0.1:8080/live/1/8"""
         self.batch_add_button.config(state=tk.NORMAL)
         self.clear_button.config(state=tk.NORMAL)
         
-        self.progress_bar.stop()
-        self.progress_bar.pack_forget()
-        
     def on_closing(self):
         self.stop_monitoring()
-        # 安全地停止 asyncio 事件循环
-        event_loop.call_soon_threadsafe(event_loop.stop)
-        
+        self.master.destroy()
+
 # ==============================================================================
 # 独立的程序入口，只在直接运行此文件时执行
 # ==============================================================================
-def main():
-    global event_loop
-    # 创建并启动一个单独的线程来运行 asyncio 事件循环
-    def run_asyncio_loop(loop):
-        asyncio.set_event_loop(loop)
-        loop.run_forever()
-
-    event_loop = asyncio.new_event_loop()
-    loop_thread = threading.Thread(target=run_asyncio_loop, args=(event_loop,), daemon=True)
-    loop_thread.start()
-
+if __name__ == "__main__":
     root = tk.Tk()
-    root.title("RTSP 压测工具 - 异步版")
-    root.geometry("1000x600")
+    root.title("RTSP 压测工具")
+    root.geometry("800x600")
 
     app = StressTestFrame(root)
     app.pack(fill=tk.BOTH, expand=True)
 
     def on_closing():
         app.on_closing()
-        root.destroy()
         
     root.protocol("WM_DELETE_WINDOW", on_closing)
 
     root.mainloop()
-
-if __name__ == "__main__":
-    main()
