@@ -11,6 +11,7 @@ import logging.handlers
 from collections import defaultdict, deque
 import psutil
 import av
+import av.error
 import pandas as pd
 import datetime
 
@@ -26,6 +27,7 @@ class SettingsManager:
         self.sys_monitor_enabled = True  # 是否启用系统性能监控
         self.log_level = logging.INFO
         self.expected_fps = 25
+        self.global_threads_count = 1
 
 SETTINGS = SettingsManager()
 
@@ -36,7 +38,7 @@ SETTINGS = SettingsManager()
 STATUS_QUEUES = defaultdict(queue.Queue)
 # 日志队列，用于子线程与主线程通信
 LOG_QUEUE = deque()
-# 存储每个线程条目与其父级地址条目的映射关系
+# 存储每个线程条目与其URL的映射关系 (现在是扁平化的)
 THREAD_TO_URL_MAP = {}
 # 存储每个地址的聚合数据
 AGGREGATED_DATA = defaultdict(lambda: {
@@ -76,11 +78,10 @@ logging.getLogger().addHandler(ThreadSafeLogHandler(LOG_QUEUE))
 # 多线程视频流监控
 # ==============================================================================
 class RTSPStreamMonitor(threading.Thread):
-    def __init__(self, url, thread_id, parent_item_id, thread_item_id, protocol='UDP'):
+    def __init__(self, url, thread_id, thread_item_id, protocol='UDP'):
         super().__init__()
         self.url = url
         self.thread_id = thread_id
-        self.parent_item_id = parent_item_id
         self.thread_item_id = thread_item_id
         self.protocol = protocol
         self.stop_event = threading.Event()
@@ -140,7 +141,6 @@ class RTSPStreamMonitor(threading.Thread):
 
                     status_info = {
                         'thread_id': self.thread_id,
-                        'parent_item_id': self.parent_item_id,
                         'thread_item_id': self.thread_item_id,
                         'status': "正常",
                         'total_frames': self.total_frames,
@@ -158,12 +158,13 @@ class RTSPStreamMonitor(threading.Thread):
                     
                     time.sleep(0.001)
                 
-            except (av.AVError, TimeoutError) as e:
+                
+            except (av.FFmpegError, TimeoutError) as e:
+            
                 self.reconnect_count += 1
                 self.logger.error(f"连接或拉流失败: {e}。第 {self.reconnect_count} 次重试中...")
                 status_info = {
                     'thread_id': self.thread_id,
-                    'parent_item_id': self.parent_item_id,
                     'thread_item_id': self.thread_item_id,
                     'status': f"连接失败 (重试{self.reconnect_count})",
                     'total_frames': self.total_frames,
@@ -208,13 +209,10 @@ class SystemMonitor(threading.Thread):
     def run(self):
         while not self.stop_event.is_set():
             try:
-                # 获取整个系统的CPU百分比
                 cpu_percent = psutil.cpu_percent(interval=None)
-                # 获取整个系统已使用的内存（单位MB）
                 mem_info = psutil.virtual_memory()
-                memory_usage_mb = mem_info.used / (1024 * 1024)
+                memory_usage_mb = mem_info.used / (1280 * 1280)
                 
-                # 获取网络I/O
                 current_net_stats = psutil.net_io_counters()
                 net_sent = current_net_stats.bytes_sent - self.last_net_stats.bytes_sent
                 net_recv = current_net_stats.bytes_recv - self.last_net_stats.bytes_recv
@@ -248,8 +246,9 @@ class StressTestFrame(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
         self.url_list_data = {}
-        self.url_counter = 0 # 用于生成唯一的父级ID
+        self.thread_counter = 0 # 用于生成唯一的线程ID
         self.monitor_threads = []
+        self.total_threads_count = 0
         
         self.create_widgets()
         self.update_statuses()
@@ -268,15 +267,16 @@ class StressTestFrame(ttk.Frame):
         self.url_entry.insert(0, "rtsp://192.168.0.3/live/1/1")
         self.url_entry.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
 
-        ttk.Label(control_frame, text="线程数:").grid(row=0, column=2, padx=5, pady=5, sticky='w')
-        self.threads_combobox = ttk.Combobox(control_frame, width=5, values=list(range(1, 11)) + [20, 40, 60, 100], state="readonly")
-        self.threads_combobox.set("1")
-        self.threads_combobox.grid(row=0, column=3, padx=5, pady=5)
-        
-        ttk.Label(control_frame, text="协议:").grid(row=0, column=4, padx=5, pady=5, sticky='w')
+        ttk.Label(control_frame, text="协议:").grid(row=0, column=2, padx=5, pady=5, sticky='w')
         self.protocol_combobox = ttk.Combobox(control_frame, width=4, values=['UDP', 'TCP'], state="readonly")
         self.protocol_combobox.set("UDP")
-        self.protocol_combobox.grid(row=0, column=5, padx=5, pady=5, sticky='w')
+        self.protocol_combobox.grid(row=0, column=3, padx=5, pady=5, sticky='w')
+        
+        ttk.Label(control_frame, text="线程数:").grid(row=0, column=4, padx=5, pady=5, sticky='w')
+        self.threads_combobox = ttk.Combobox(control_frame, width=5, values=list(range(1, 11)) + [20, 40, 60, 100], state="readonly")
+        self.threads_combobox.set("1")
+        self.threads_combobox.grid(row=0, column=5, padx=5, pady=5)
+        self.threads_combobox.bind('<<ComboboxSelected>>', self.update_global_threads_count)
 
         self.add_button = ttk.Button(control_frame, text="添加", command=self.add_url)
         self.add_button.grid(row=0, column=6, padx=5, pady=5)
@@ -290,9 +290,6 @@ class StressTestFrame(ttk.Frame):
         self.settings_button = ttk.Button(control_frame, text="参数设置", command=self.open_settings_window)
         self.settings_button.grid(row=0, column=9, padx=5, pady=5)
         
-        self.export_button = ttk.Button(control_frame, text="导出数据", command=self.export_to_excel)
-        self.export_button.grid(row=0, column=10, padx=5, pady=5)
-        
         # 中间表格展示区
         ttk.Label(self, text="待监控地址列表:").grid(row=1, column=0, padx=10, pady=(10, 0), sticky='w')
         self.address_frame = ttk.Frame(self, relief=tk.GROOVE, borderwidth=1)
@@ -300,11 +297,10 @@ class StressTestFrame(ttk.Frame):
         self.address_frame.columnconfigure(0, weight=1)
         self.address_frame.rowconfigure(0, weight=1)
         
-        columns = ('id', 'url', 'threads', 'status', 'fps', 'received_frames', 'expected_frames', 'lost_frames', 'lost_rate', 'total_bytes', 'reconnects', 'latency')
+        columns = ('id', 'url', 'status', 'fps', 'received_frames', 'expected_frames', 'lost_frames', 'lost_rate', 'total_bytes', 'reconnects', 'latency')
         self.tree = ttk.Treeview(self.address_frame, columns=columns, show='headings')
         self.tree.heading('id', text='ID', anchor='center')
         self.tree.heading('url', text='RTSP 地址', anchor='w')
-        self.tree.heading('threads', text='线程', anchor='center')
         self.tree.heading('status', text='状态', anchor='center')
         self.tree.heading('fps', text='实时FPS', anchor='center')
         self.tree.heading('received_frames', text='有效帧', anchor='center')
@@ -315,9 +311,8 @@ class StressTestFrame(ttk.Frame):
         self.tree.heading('reconnects', text='重连次数', anchor='center')
         self.tree.heading('latency', text='连接延迟', anchor='center')
         
-        self.tree.column('id', width=40, anchor='center', stretch=False)
+        self.tree.column('id', width=60, anchor='center', stretch=False)
         self.tree.column('url', minwidth=200, anchor='w', stretch=True) 
-        self.tree.column('threads', width=50, anchor='center', stretch=False)
         self.tree.column('status', width=120, anchor='center', stretch=False)
         self.tree.column('fps', width=80, anchor='center', stretch=False)
         self.tree.column('received_frames', width=80, anchor='center', stretch=False)
@@ -334,7 +329,6 @@ class StressTestFrame(ttk.Frame):
         self.tree_scrollbar.grid(row=0, column=1, sticky='ns')
         
         self.tree.bind("<Button-3>", self.show_tree_context_menu)
-        self.tree.bind("<Double-1>", self.on_double_click)
         
         # 底部控制和状态
         bottom_frame = ttk.Frame(self, padding="10")
@@ -348,19 +342,28 @@ class StressTestFrame(ttk.Frame):
         self.stop_button = ttk.Button(bottom_frame, text="停止监控", command=self.stop_monitoring, state=tk.DISABLED)
         self.stop_button.grid(row=0, column=1, padx=5)
         
-        self.status_label = ttk.Label(bottom_frame, text="已停止", foreground="blue")
-        self.status_label.grid(row=0, column=2, padx=10, sticky='w')
+        self.export_button = ttk.Button(bottom_frame, text="导出数据", command=self.export_to_excel)
+        self.export_button.grid(row=0, column=2, padx=5)
         
+        status_and_perf_frame = ttk.Frame(bottom_frame)
+        status_and_perf_frame.grid(row=0, column=3, padx=10, sticky='e')
+        
+        self.status_label = ttk.Label(status_and_perf_frame, text="已停止", foreground="blue")
+        self.status_label.grid(row=0, column=0, padx=(10, 5), sticky='w')
+        
+        self.status_progress = ttk.Progressbar(status_and_perf_frame, orient="horizontal", length=100, mode="indeterminate")
+        self.status_progress.grid(row=0, column=1, sticky='w')
+
         # 性能监控面板 (使用进度条)
-        perf_frame = ttk.Frame(bottom_frame)
-        perf_frame.grid(row=0, column=3, padx=10, sticky='e')
+        perf_frame = ttk.Frame(status_and_perf_frame)
+        perf_frame.grid(row=0, column=2, padx=(20,0), sticky='e')
 
         self.cpu_label = ttk.Label(perf_frame, text="CPU: 0.00%")
         self.cpu_label.grid(row=0, column=0, sticky='w')
         self.cpu_progress = ttk.Progressbar(perf_frame, orient="horizontal", length=80, mode="determinate")
         self.cpu_progress.grid(row=0, column=1, padx=2, sticky='w')
 
-        self.mem_label = ttk.Label(perf_frame, text="内存: 0.00 MB")
+        self.mem_label = ttk.Label(perf_frame, text="内存: 0.00%")
         self.mem_label.grid(row=0, column=2, padx=(10,0), sticky='w')
         self.mem_progress = ttk.Progressbar(perf_frame, orient="horizontal", length=80, mode="determinate")
         self.mem_progress.grid(row=0, column=3, padx=2, sticky='w')
@@ -385,18 +388,14 @@ class StressTestFrame(ttk.Frame):
         
         self.log_text = scrolledtext.ScrolledText(log_frame, height=15, state='disabled', wrap=tk.WORD, font=('Courier', 10))
         self.log_text.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
-
-    def on_double_click(self, event):
-        item_id = self.tree.identify_row(event.y)
-        if not item_id or self.tree.parent(item_id):
-            return # 确保双击的是父级行
-        
-        # 检查是否为父级多线程地址
-        if self.url_list_data.get(item_id, {}).get('threads_count', 1) > 1:
-            # 切换展开/收起状态
-            current_state = self.tree.item(item_id, 'open')
-            self.tree.item(item_id, open=not current_state)
-
+    
+    def update_global_threads_count(self, event):
+        """更新全局线程数，并更新列表中所有地址的显示"""
+        try:
+            new_threads_count = int(self.threads_combobox.get())
+            SETTINGS.global_threads_count = new_threads_count
+        except ValueError:
+            pass 
 
     def show_tree_context_menu(self, event):
         menu = tk.Menu(self.tree, tearoff=0)
@@ -421,9 +420,7 @@ class StressTestFrame(ttk.Frame):
             
             urls_to_copy = []
             for item in selected_items:
-                # 只复制顶层地址项
-                if item in self.url_list_data:
-                    urls_to_copy.append(self.url_list_data[item]['url'])
+                urls_to_copy.append(self.url_list_data[item]['url'])
             
             if urls_to_copy:
                 self.clipboard_clear()
@@ -431,9 +428,7 @@ class StressTestFrame(ttk.Frame):
 
         def select_all():
             all_items = self.tree.get_children()
-            # 仅选择父级项
-            parent_items = [item for item in all_items if self.tree.parent(item) == '']
-            self.tree.selection_set(parent_items)
+            self.tree.selection_set(all_items)
 
         def delete_selected():
             selected_items = self.tree.selection()
@@ -469,31 +464,26 @@ class StressTestFrame(ttk.Frame):
         frame = ttk.Frame(settings_window, padding="10")
         frame.pack(fill=tk.BOTH, expand=True)
 
-        # 刷新频率设置
         ttk.Label(frame, text="GUI刷新频率 (ms):").grid(row=0, column=0, padx=5, pady=5, sticky='w')
         refresh_interval_var = tk.StringVar(value=str(SETTINGS.gui_refresh_interval))
         refresh_combobox = ttk.Combobox(frame, textvariable=refresh_interval_var, values=['50', '100', '200', '500', '1000'], state="readonly")
         refresh_combobox.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
         
-        # 拉流超时设置
-        ttk.Label(frame, text="拉流超时 (μs):").grid(row=1, column=0, padx=5, pady=5, sticky='w')
-        timeout_var = tk.StringVar(value=str(SETTINGS.rtsp_timeout))
-        timeout_combobox = ttk.Combobox(frame, textvariable=timeout_var, values=['1000000', '2000000', '5000000', '10000000'], state="readonly")
+        ttk.Label(frame, text="拉流超时 (ms):").grid(row=1, column=0, padx=5, pady=5, sticky='w')
+        timeout_var = tk.StringVar(value=str(SETTINGS.rtsp_timeout // 1000))
+        timeout_combobox = ttk.Combobox(frame, textvariable=timeout_var, values=['1000', '2000', '5000', '10000', '30000'], state="readonly")
         timeout_combobox.grid(row=1, column=1, padx=5, pady=5, sticky='ew')
 
-        # 重连等待时间设置
         ttk.Label(frame, text="重连等待时间 (s):").grid(row=2, column=0, padx=5, pady=5, sticky='w')
         reconnect_wait_var = tk.StringVar(value=str(SETTINGS.reconnect_wait_time))
         reconnect_combobox = ttk.Combobox(frame, textvariable=reconnect_wait_var, values=['1', '3', '5', '10', '15', '30'], state="readonly")
         reconnect_combobox.grid(row=2, column=1, padx=5, pady=5, sticky='ew')
         
-        # 预期帧率设置
         ttk.Label(frame, text="预期帧率 (FPS):").grid(row=3, column=0, padx=5, pady=5, sticky='w')
         expected_fps_var = tk.StringVar(value=str(SETTINGS.expected_fps))
         expected_fps_combobox = ttk.Combobox(frame, textvariable=expected_fps_var, values=['15', '20', '25', '30', '50', '60'], state="readonly")
         expected_fps_combobox.grid(row=3, column=1, padx=5, pady=5, sticky='ew')
         
-        # 系统性能监控开关
         sys_monitor_var = tk.BooleanVar(value=SETTINGS.sys_monitor_enabled)
         sys_monitor_check = ttk.Checkbutton(frame, text="启用系统性能监控", variable=sys_monitor_var)
         sys_monitor_check.grid(row=4, column=0, columnspan=2, padx=5, pady=5, sticky='w')
@@ -501,10 +491,10 @@ class StressTestFrame(ttk.Frame):
         def save_settings():
             try:
                 SETTINGS.gui_refresh_interval = int(refresh_interval_var.get())
-                SETTINGS.rtsp_timeout = int(timeout_var.get())
+                SETTINGS.rtsp_timeout = int(timeout_var.get()) * 1000
                 SETTINGS.reconnect_wait_time = int(reconnect_wait_var.get())
                 SETTINGS.sys_monitor_enabled = sys_monitor_var.get()
-                SETTINGS.expected_fps = int(expected_fps_var.get())
+                SETTINGS.expected_fps = int(expected_fps_combobox.get())
                 settings_window.destroy()
                 messagebox.showinfo("提示", "参数已保存，将在下次启动监控时生效。")
             except ValueError:
@@ -549,30 +539,26 @@ class StressTestFrame(ttk.Frame):
             messagebox.showerror("错误", "RTSP 地址不能为空！")
             return
             
-        self.url_counter += 1
         threads_count = int(self.threads_combobox.get())
         
-        display_url = f"+ {url}" if threads_count > 1 else url
-        
-        item_id = self.tree.insert('', tk.END, iid=f"url_{self.url_counter}", values=(
-            self.url_counter,
-            display_url,
-            threads_count,
-            "未启动", 
-            "0.00", "0", "0", "0", "0.00%", "0.00 MB", "0", "0.00s"
-        ), tags=('parent_url',))
-        
-        self.tree.tag_configure('parent_url', font=('TkDefaultFont', 9, 'bold'))
-        self.tree.tag_configure('warning', background='#ffcccb')
-        self.tree.tag_configure('normal', background='')
-        self.tree.tag_configure('thread_info', background='#f0f0f0')
-        
-        self.url_list_data[item_id] = {
-            'id': self.url_counter,
-            'url': url,
-            'threads_count': threads_count,
-            'thread_item_ids': []
-        }
+        for i in range(threads_count):
+            self.thread_counter += 1
+            thread_id = f"thread_{self.thread_counter}"
+            item_id = self.tree.insert('', tk.END, iid=thread_id, values=(
+                f"#{self.thread_counter}",
+                url,
+                "未启动", 
+                "0.00", "0", "0", "0", "0.00%", "0.00 MB", "0", "0.00s"
+            ), tags=('thread_row',))
+            
+            self.tree.tag_configure('thread_row', font=('TkDefaultFont', 9))
+            self.tree.tag_configure('warning', background='#ffcccb')
+            self.tree.tag_configure('normal', background='')
+            
+            self.url_list_data[item_id] = {
+                'id': self.thread_counter,
+                'url': url,
+            }
         self.url_entry.delete(0, tk.END)
 
     def remove_url(self, item_id):
@@ -586,7 +572,7 @@ class StressTestFrame(ttk.Frame):
     def clear_list(self):
         self.stop_monitoring()
         self.url_list_data.clear()
-        self.url_counter = 0
+        self.thread_counter = 0
         AGGREGATED_DATA.clear()
         self.tree.delete(*self.tree.get_children())
             
@@ -600,18 +586,17 @@ class StressTestFrame(ttk.Frame):
                 self.log_text.configure(state='disabled')
                 self.log_text.see(tk.END)
         
-        # 清空聚合数据中的瞬时列表
+        # 清空聚合数据中的瞬时列表 (虽然扁平化了，但这个结构仍可用于导出)
         for key in AGGREGATED_DATA:
             AGGREGATED_DATA[key]['fps_list'] = []
             AGGREGATED_DATA[key]['latency_list'] = []
         
-        # 处理状态队列并进行聚合
+        # 处理状态队列
         all_updates = []
         for thread_id, status_queue in STATUS_QUEUES.items():
             while not status_queue.empty():
                 all_updates.append(status_queue.get_nowait())
                 
-        # 区分系统监控信息和RTSP线程信息
         rtsp_updates = [u for u in all_updates if u['thread_id'] != -1]
         sys_updates = [u for u in all_updates if u['thread_id'] == -1]
 
@@ -623,23 +608,20 @@ class StressTestFrame(ttk.Frame):
             
             total_memory_mb = psutil.virtual_memory().total / (1024 * 1024)
             mem_percent = (sys_info['memory_usage_mb'] / total_memory_mb) * 100
-            self.mem_label.config(text=f"内存: {sys_info['memory_usage_mb']:.2f} MB")
+            self.mem_label.config(text=f"内存: {mem_percent:.2f}%")
             self.mem_progress['value'] = mem_percent
 
             self.net_label.config(text=f"网络: ↓{sys_info['net_recv_mb']:.2f}MB/s ↑{sys_info['net_sent_mb']:.2f}MB/s")
-
-        # 更新每个 RTSP 线程条目，并按父级地址聚合
-        updates_by_parent = defaultdict(list)
+        
+        # 更新每个 RTSP 线程条目
         for update in rtsp_updates:
-            updates_by_parent[update['parent_item_id']].append(update)
-            
-            # 更新子线程行
-            if self.tree.exists(update['thread_item_id']):
+            thread_item_id = update['thread_item_id']
+            if self.tree.exists(thread_item_id):
                 lost_rate = (update['lost_frames'] / update['expected_frames']) * 100 if update['expected_frames'] > 0 else 0
-                self.tree.item(update['thread_item_id'], values=(
-                    '',
-                    '线程' + str(update['thread_id']),
-                    '',
+                
+                self.tree.item(thread_item_id, values=(
+                    f"#{update['thread_id']}",
+                    THREAD_TO_URL_MAP.get(update['thread_id'], 'N/A'),
                     update['status'],
                     f"{update['current_fps']:.2f}",
                     update['received_frames'],
@@ -651,45 +633,16 @@ class StressTestFrame(ttk.Frame):
                     f"{update['connect_latency']:.2f}s"
                 ))
 
-        # 聚合数据并更新父级行
-        for parent_item_id, updates in updates_by_parent.items():
-            if not self.tree.exists(parent_item_id):
-                continue
+                if lost_rate > 10 or update['reconnect_count'] > 0:
+                    self.tree.item(thread_item_id, tags=('warning',))
+                else:
+                    self.tree.item(thread_item_id, tags=('normal',))
 
-            # 重置并重新聚合
-            AGGREGATED_DATA[parent_item_id]['total_frames'] = sum(u['received_frames'] for u in updates)
-            AGGREGATED_DATA[parent_item_id]['total_bytes'] = sum(u['total_bytes'] for u in updates)
-            AGGREGATED_DATA[parent_item_id]['total_reconnects'] = sum(u['reconnect_count'] for u in updates)
-            AGGREGATED_DATA[parent_item_id]['total_expected_frames'] = sum(u['expected_frames'] for u in updates)
-            AGGREGATED_DATA[parent_item_id]['total_lost_frames'] = sum(u['lost_frames'] for u in updates)
-            AGGREGATED_DATA[parent_item_id]['fps_list'] = [u['current_fps'] for u in updates]
-            AGGREGATED_DATA[parent_item_id]['latency_list'] = [u['connect_latency'] for u in updates]
-            
-            data = AGGREGATED_DATA[parent_item_id]
-            avg_fps = sum(data['fps_list']) / len(data['fps_list']) if data['fps_list'] else 0
-            avg_latency = sum(data['latency_list']) / len(data['latency_list']) if data['latency_list'] else 0
-            total_lost_rate = (data['total_lost_frames'] / data['total_expected_frames']) * 100 if data['total_expected_frames'] > 0 else 0
-
-            self.tree.item(parent_item_id, values=(
-                self.url_list_data[parent_item_id]['id'],
-                self.tree.item(parent_item_id, 'values')[1], # 保持URL不变
-                self.url_list_data[parent_item_id]['threads_count'], # 修复后的逻辑：直接从原始数据中获取线程数
-                "监控中",
-                f"{avg_fps:.2f}",
-                data['total_frames'],
-                data['total_expected_frames'],
-                data['total_lost_frames'],
-                f"{total_lost_rate:.2f}%",
-                f"{data['total_bytes'] / (1024*1024):.2f} MB",
-                data['total_reconnects'],
-                f"{avg_latency:.2f}s"
-            ))
-            
-            if total_lost_rate > 10 or data['total_reconnects'] > 0:
-                self.tree.item(parent_item_id, tags=('warning',))
-            else:
-                self.tree.item(parent_item_id, tags=('normal',))
-                
+        # 检查是否所有线程都已启动，并更新状态标签
+        if self.monitor_threads and all(t.is_alive() for t in self.monitor_threads):
+            self.status_label.config(text=f"正在运行({self.total_threads_count}线程)...")
+            self.status_progress.stop()
+        
         self.after(SETTINGS.gui_refresh_interval, self.update_statuses)
 
     def export_to_excel(self):
@@ -708,10 +661,12 @@ class StressTestFrame(ttk.Frame):
                 avg_fps = sum(data['fps_list']) / len(data['fps_list']) if data['fps_list'] else 0
                 avg_latency = sum(data['latency_list']) / len(data['latency_list']) if data['latency_list'] else 0
                 total_lost_rate = (data['total_lost_frames'] / data['total_expected_frames']) * 100 if data['total_expected_frames'] > 0 else 0
+                
+                threads_count = self.url_list_data.get(item_id, {}).get('threads_count', 1)
 
                 data_to_export.append({
                     "RTSP 地址": url,
-                    "线程数": self.url_list_data[item_id]['threads_count'],
+                    "线程数": threads_count,
                     "总有效帧": data['total_frames'],
                     "总预计帧": data['total_expected_frames'],
                     "总丢失帧": data['total_lost_frames'],
@@ -735,6 +690,7 @@ class StressTestFrame(ttk.Frame):
             return
             
         self.stop_monitoring()
+        
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.add_button.config(state=tk.DISABLED)
@@ -748,12 +704,14 @@ class StressTestFrame(ttk.Frame):
         self.log_text.configure(state='disabled')
         
         logging.info("--- 监控任务启动 ---")
-        self.status_label.config(text="监控中...")
-        AGGREGATED_DATA.clear()
-        THREAD_TO_URL_MAP.clear()
-
+        
         self.monitor_threads = []
         STATUS_QUEUES.clear()
+        
+        self.total_threads_count = len(self.url_list_data)
+        
+        self.status_label.config(text=f"正在启动({self.total_threads_count}线程)...")
+        self.status_progress.start()
         
         # 启动系统监控线程
         if SETTINGS.sys_monitor_enabled:
@@ -763,36 +721,20 @@ class StressTestFrame(ttk.Frame):
             sys_monitor_thread.start()
 
         # 启动 RTSP 监控线程
-        task_counter = 0
         for item_id, data in self.url_list_data.items():
-            threads_count = data['threads_count']
-            
-            # 清除旧的子项
-            if self.tree.get_children(item_id):
-                self.tree.delete(*self.tree.get_children(item_id))
-            self.url_list_data[item_id]['thread_item_ids'] = []
+            self.thread_counter = data['id']
+            thread_id = self.thread_counter
+            THREAD_TO_URL_MAP[thread_id] = data['url']
 
-            for i in range(threads_count):
-                task_counter += 1
-                thread_item_id = self.tree.insert(item_id, tk.END, tags=('thread_info',), values=(
-                    f"#{task_counter}", 
-                    "启动中", 
-                    "", 
-                    "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
-                ))
-                self.url_list_data[item_id]['thread_item_ids'].append(thread_item_id)
-                THREAD_TO_URL_MAP[thread_item_id] = item_id
-
-                thread = RTSPStreamMonitor(
-                    url=data['url'],
-                    thread_id=task_counter,
-                    parent_item_id=item_id,
-                    thread_item_id=thread_item_id,
-                    protocol=self.protocol_combobox.get()
-                )
-                self.monitor_threads.append(thread)
-                STATUS_QUEUES[task_counter] = queue.Queue()
-                thread.start()
+            thread = RTSPStreamMonitor(
+                url=data['url'],
+                thread_id=thread_id,
+                thread_item_id=item_id,
+                protocol=self.protocol_combobox.get()
+            )
+            self.monitor_threads.append(thread)
+            STATUS_QUEUES[thread_id] = queue.Queue()
+            thread.start()
         
         logging.info(f"已创建 {len(self.monitor_threads)} 个监控线程。")
 
@@ -803,6 +745,8 @@ class StressTestFrame(ttk.Frame):
         logging.info("--- 正在发送停止信号... ---")
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.DISABLED)
+        self.status_label.config(text=f"正在停止({self.total_threads_count}线程)...")
+        self.status_progress.start()
         
         for thread in self.monitor_threads:
             thread.stop()
@@ -822,6 +766,8 @@ class StressTestFrame(ttk.Frame):
         
         logging.info("--- 所有监控线程已停止。---")
         self.status_label.config(text="已停止")
+        self.status_progress.stop()
+
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
         self.add_button.config(state=tk.NORMAL)
@@ -839,7 +785,7 @@ class StressTestFrame(ttk.Frame):
 # ==============================================================================
 if __name__ == "__main__":
     root = tk.Tk()
-    root.title("RTSP 压测工具")
+    root.title(f"RTSP 压测工具 (线程数: {SETTINGS.global_threads_count})")
     root.geometry("1200x800")
 
     app = StressTestFrame(root)
