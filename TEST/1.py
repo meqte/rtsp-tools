@@ -12,7 +12,6 @@ from collections import defaultdict, deque
 import psutil
 import av
 import av.error
-import pandas as pd
 import datetime
 
 # ==============================================================================
@@ -40,7 +39,7 @@ STATUS_QUEUES = defaultdict(queue.Queue)
 LOG_QUEUE = deque()
 # 存储每个线程条目与其URL的映射关系 (现在是扁平化的)
 THREAD_TO_URL_MAP = {}
-# 存储每个地址的聚合数据
+# 存储每个地址的聚合数据，使用树形控件的item_id作为键
 AGGREGATED_DATA = defaultdict(lambda: {
     'threads_count': 0,
     'total_frames': 0,
@@ -158,9 +157,7 @@ class RTSPStreamMonitor(threading.Thread):
                     
                     time.sleep(0.001)
                 
-                
             except (av.FFmpegError, TimeoutError) as e:
-            
                 self.reconnect_count += 1
                 self.logger.error(f"连接或拉流失败: {e}。第 {self.reconnect_count} 次重试中...")
                 status_info = {
@@ -342,7 +339,8 @@ class StressTestFrame(ttk.Frame):
         self.stop_button = ttk.Button(bottom_frame, text="停止监控", command=self.stop_monitoring, state=tk.DISABLED)
         self.stop_button.grid(row=0, column=1, padx=5)
         
-        self.export_button = ttk.Button(bottom_frame, text="导出数据", command=self.export_to_excel)
+        # 修改为导出为 .txt 文件
+        self.export_button = ttk.Button(bottom_frame, text="导出数据", command=self.export_to_txt)
         self.export_button.grid(row=0, column=2, padx=5)
         
         status_and_perf_frame = ttk.Frame(bottom_frame)
@@ -516,7 +514,7 @@ class StressTestFrame(ttk.Frame):
         
         batch_text = scrolledtext.ScrolledText(frame, wrap=tk.WORD, height=10)
         batch_text.pack(fill=tk.BOTH, expand=True)
-        default_urls = "rtsp://192.168.16.3/live/1/1\nrtsp://192.168.16.3/live/1/2\nrtsp://192.168.16.3/live/1/3"
+        default_urls = "rtsp://192.168.16.3/live/1/1\nrtsp://192.168.16.3/live/1/2\nrtsp://192.168.16.3/live/1/3\nrtsp://192.168.16.3/live/1/4\nrtsp://192.168.16.3/live/1/5\nrtsp://192.168.16.3/live/1/6\nrtsp://192.168.16.3/live/1/7\nrtsp://192.168.16.3/live/1/8"
         batch_text.insert(tk.END, default_urls)
 
         def save_and_close():
@@ -613,12 +611,22 @@ class StressTestFrame(ttk.Frame):
 
             self.net_label.config(text=f"网络: ↓{sys_info['net_recv_mb']:.2f}MB/s ↑{sys_info['net_sent_mb']:.2f}MB/s")
         
-        # 更新每个 RTSP 线程条目
+        # 更新每个 RTSP 线程条目并聚合数据
         for update in rtsp_updates:
             thread_item_id = update['thread_item_id']
             if self.tree.exists(thread_item_id):
                 lost_rate = (update['lost_frames'] / update['expected_frames']) * 100 if update['expected_frames'] > 0 else 0
                 
+                # 聚合数据到 AGGREGATED_DATA
+                agg_data = AGGREGATED_DATA[thread_item_id]
+                agg_data['total_frames'] = update['total_frames']
+                agg_data['total_bytes'] = update['total_bytes']
+                agg_data['total_reconnects'] = update['reconnect_count']
+                agg_data['total_expected_frames'] = update['expected_frames']
+                agg_data['total_lost_frames'] = update['lost_frames']
+                agg_data['fps_list'].append(update['current_fps'])
+                agg_data['latency_list'].append(update['connect_latency'])
+
                 self.tree.item(thread_item_id, values=(
                     f"#{update['thread_id']}",
                     THREAD_TO_URL_MAP.get(update['thread_id'], 'N/A'),
@@ -645,40 +653,47 @@ class StressTestFrame(ttk.Frame):
         
         self.after(SETTINGS.gui_refresh_interval, self.update_statuses)
 
-    def export_to_excel(self):
-        if not AGGREGATED_DATA:
+    def export_to_txt(self):
+        if not self.url_list_data or not AGGREGATED_DATA:
             messagebox.showwarning("警告", "没有数据可供导出！")
             return
 
-        file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
+        file_path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
         if not file_path:
             return
 
         try:
-            data_to_export = []
-            for item_id, data in AGGREGATED_DATA.items():
-                url = self.url_list_data[item_id]['url']
-                avg_fps = sum(data['fps_list']) / len(data['fps_list']) if data['fps_list'] else 0
-                avg_latency = sum(data['latency_list']) / len(data['latency_list']) if data['latency_list'] else 0
-                total_lost_rate = (data['total_lost_frames'] / data['total_expected_frames']) * 100 if data['total_expected_frames'] > 0 else 0
-                
-                threads_count = self.url_list_data.get(item_id, {}).get('threads_count', 1)
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(f"--- RTSP Stream Monitoring Report ---\n")
+                f.write(f"Export Time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
 
-                data_to_export.append({
-                    "RTSP 地址": url,
-                    "线程数": threads_count,
-                    "总有效帧": data['total_frames'],
-                    "总预计帧": data['total_expected_frames'],
-                    "总丢失帧": data['total_lost_frames'],
-                    "总丢失率": f"{total_lost_rate:.2f}%",
-                    "总流量 (MB)": f"{data['total_bytes'] / (1024*1024):.2f}",
-                    "总重连次数": data['total_reconnects'],
-                    "平均FPS": f"{avg_fps:.2f}",
-                    "平均连接延迟 (s)": f"{avg_latency:.2f}"
-                })
-            
-            df = pd.DataFrame(data_to_export)
-            df.to_excel(file_path, index=False)
+                for item_id in self.tree.get_children():
+                    thread_info = self.url_list_data.get(item_id, None)
+                    agg_data = AGGREGATED_DATA.get(item_id, None)
+
+                    if not thread_info or not agg_data:
+                        continue
+
+                    url = thread_info['url']
+                    thread_id = thread_info['id']
+                    
+                    avg_fps = sum(agg_data['fps_list']) / len(agg_data['fps_list']) if agg_data['fps_list'] else 0
+                    avg_latency = sum(agg_data['latency_list']) / len(agg_data['latency_list']) if agg_data['latency_list'] else 0
+                    total_lost_rate = (agg_data['total_lost_frames'] / agg_data['total_expected_frames']) * 100 if agg_data['total_expected_frames'] > 0 else 0
+
+                    f.write(f"RTSP 地址: {url}\n")
+                    f.write(f"线程 ID: #{thread_id}\n")
+                    f.write(f"总接收帧数: {agg_data['total_frames']}\n")
+                    f.write(f"总预计帧数: {agg_data['total_expected_frames']}\n")
+                    f.write(f"总丢失帧数: {agg_data['total_lost_frames']}\n")
+                    f.write(f"总丢失率: {total_lost_rate:.2f}%\n")
+                    f.write(f"总流量 (MB): {agg_data['total_bytes'] / (1024*1024):.2f}\n")
+                    f.write(f"总重连次数: {agg_data['total_reconnects']}\n")
+                    f.write(f"平均 FPS: {avg_fps:.2f}\n")
+                    f.write(f"平均连接延迟 (s): {avg_latency:.2f}\n")
+                    f.write("-" * 30 + "\n")
+
+                    
             messagebox.showinfo("成功", f"数据已成功导出到：\n{file_path}")
 
         except Exception as e:
