@@ -1,25 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-批量 RTSP 摄像头截图工具 v10
+批量 RTSP 摄像头截图工具 v11
 
 核心功能：
 - 提供一个 GUI 界面，用于输入多个 RTSP 地址。
 - 使用多线程并发连接到每个 RTSP 流，并优化截图逻辑。
-- **v10: 引入了连接重试和多帧捕获机制，以提高截图成功率和质量。**
-- **v10: 捕获多帧并选择最“完整”的一帧进行保存，以解决花屏问题。**
+- **v11: 使用 PyAV 替代 OpenCV，提高 RTSP 流兼容性和打包稳定性。**
+- **v11: 引入了连接重试和多帧捕获机制，以提高截图成功率和质量。**
+- **v11: 捕获多帧并选择最"完整"的一帧进行保存，以解决花屏问题。**
 - 将截图文件保存到指定的 IMG 文件夹中。
 - 提供实时日志输出，显示每个地址的截图状态。
 
 技术栈：
 - GUI 库: tkinter，与之前的工具保持一致。
-- 视频处理: OpenCV (cv2)，用于连接 RTSP 流和保存图片。
+- 视频处理: PyAV (av)，用于连接 RTSP 流和保存图片。
 - 并发处理: threading，用于高效地处理多个任务。
 
 使用方法：
-1.  确保已安装 OpenCV: `pip install opencv-python`
-2.  在“RTSP 地址”文本框中粘贴 RTSP 地址，每行一个。
-3.  调整“截图质量”参数（0-100，默认100）。
-4.  点击“开始截图”按钮。
+1.  确保已安装 PyAV: `pip install av Pillow`
+2.  在"RTSP 地址"文本框中粘贴 RTSP 地址，每行一个。
+3.  调整"截图质量"参数（0-100，默认100）。
+4.  点击"开始截图"按钮。
 5.  截图文件将保存在程序根目录下的 `IMG` 文件夹中。
 """
 
@@ -27,7 +28,8 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import threading
 import os
-import cv2
+import av
+from PIL import Image, ImageTk
 import sys
 import time
 import re
@@ -231,23 +233,23 @@ class BatchScreenshotFrame(ttk.Frame):
         self.stop_event.set()
         self.stop_button.config(state=tk.DISABLED)
 
-    def is_valid_frame(self, frame):
+    def is_valid_frame(self, frame_array):
         """
         简单地检查一帧图像是否有效，可以根据您的需求扩展。
         这里我们检查图像是否全黑或接近全黑（一个简单的判断，可过滤掉部分花屏）。
         更高级的验证可能涉及分析图像的色彩、边缘信息等。
         """
-        # 将图像转换为灰度图
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         # 计算非零像素点的数量
-        non_zero_pixels = np.count_nonzero(gray)
+        # frame_array 是 RGB 格式的 numpy 数组
+        gray = np.mean(frame_array, axis=2)  # 转换为灰度
+        non_zero_pixels = np.count_nonzero(gray > 10)  # 阈值为10，过滤极暗像素
         # 如果非零像素点数量过少，我们认为图像无效（例如全黑或大部分是花屏）
-        # 阈值可以根据实际情况调整
-        return non_zero_pixels > 1000  
+        return non_zero_pixels > 1000
 
     def capture_worker(self, url, index, quality, retries):
         """
         由子线程执行的截图任务，包含重试和多帧捕获逻辑。
+        使用 PyAV 替代 OpenCV。
         """
         
         # 线程开始执行，但首先在屏障处等待
@@ -264,47 +266,83 @@ class BatchScreenshotFrame(ttk.Frame):
             if self.stop_event.is_set():
                 break
                 
-            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-            
-            # 设置连接超时时间，防止线程卡死
-            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
-            
-            if not cap.isOpened():
-                self.log_to_gui(f"[{index}] 连接失败 (第 {attempt+1}/{retries+1} 次尝试)", 'error')
+            try:
+                # 使用 PyAV 打开流
+                container = av.open(url, options={
+                    'rtsp_transport': 'tcp',  # 使用 TCP 传输，更稳定
+                    'stimeout': '5000000',    # 5秒超时 (微秒)
+                    'max_delay': '500000',    # 最大延迟 500ms
+                })
+                
+                video_stream = container.streams.video[0]
+                self.log_to_gui(f"[{index}] 连接成功！正在捕获帧...", 'info')
+                break
+                
+            except Exception as e:
+                self.log_to_gui(f"[{index}] 连接失败 (第 {attempt+1}/{retries+1} 次尝试): {str(e)}", 'error')
                 if attempt < retries:
                     time.sleep(1) # 重试前等待1秒
                 continue
-            else:
-                self.log_to_gui(f"[{index}] 连接成功！正在捕获帧...", 'info')
-                # 成功连接后，跳出重试循环
-                break
         else:
             # 如果重试所有次数都失败，则记录错误并返回
             self.log_to_gui(f"[{index}] 无法连接到流，已达到最大重试次数。", 'error')
-            cap.release()
             return
             
         if self.stop_event.is_set():
-            cap.release()
+            try:
+                container.close()
+            except:
+                pass
             return
 
         # 捕获多帧并选择最佳帧
         best_frame = None
-        for i in range(10): # 尝试读取10帧
-            ret, frame = cap.read()
-            if not ret or self.stop_event.is_set():
-                break # 无法读取或任务被停止
-            
-            if self.is_valid_frame(frame):
-                best_frame = frame
-                break # 找到有效帧，提前退出
-                
-        cap.release()
+        frame_count = 0
+        
+        try:
+            for packet in container.demux(video_stream):
+                if self.stop_event.is_set():
+                    break
+                    
+                for frame in packet.decode():
+                    frame_count += 1
+                    
+                    # 将 PyAV 帧转换为 numpy 数组
+                    frame_array = frame.to_ndarray(format='rgb24')
+                    
+                    if self.is_valid_frame(frame_array):
+                        best_frame = frame_array
+                        break # 找到有效帧，提前退出
+                        
+                    if frame_count >= 10:  # 最多尝试10帧
+                        break
+                        
+                if best_frame is not None or frame_count >= 10:
+                    break
+                    
+        except Exception as e:
+            self.log_to_gui(f"[{index}] 读取帧时出错: {str(e)}", 'error')
+        finally:
+            try:
+                container.close()
+            except:
+                pass
         
         if best_frame is not None:
-            filename = f"IMG/{index}.jpg"
-            cv2.imwrite(filename, best_frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-            self.log_to_gui(f"[{index}] 截图成功，已保存为: {filename} (质量: {quality})", 'success')
+            try:
+                # 将 numpy 数组转换为 PIL 图像并保存
+                image = Image.fromarray(best_frame)
+                filename = f"IMG/{index}.jpg"
+                
+                # 根据质量设置保存参数
+                if quality < 100:
+                    image.save(filename, 'JPEG', quality=quality, optimize=True)
+                else:
+                    image.save(filename, 'JPEG', quality=quality)
+                    
+                self.log_to_gui(f"[{index}] 截图成功，已保存为: {filename} (质量: {quality})", 'success')
+            except Exception as e:
+                self.log_to_gui(f"[{index}] 保存图片时出错: {str(e)}", 'error')
         else:
             self.log_to_gui(f"[{index}] 无法捕获有效帧，可能视频流质量极差或已停止。", 'error')
 

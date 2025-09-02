@@ -35,13 +35,15 @@ class PingToolFrame(ttk.Frame):
         input_frame.columnconfigure(3, weight=1)
         input_frame.columnconfigure(4, weight=1)
         input_frame.columnconfigure(5, weight=1)
+        input_frame.columnconfigure(6, weight=1)
+        input_frame.columnconfigure(7, weight=1)
 
         self.ip_entries = []
         
-        default_ips = ["192.168.16.3", "192.168.16.1", "192.168.16.100", "192.168.16.200", "baidu.com", "sohu.com", "google.com", "github.com"]
+        default_ips = ["192.168.16.1", "192.168.16.2", "192.168.16.3"]
 
         
-        for i in range(12):
+        for i in range(16):
             row = i % 4
             col = (i // 4) * 2
             
@@ -107,7 +109,7 @@ class PingToolFrame(ttk.Frame):
         targets = []
         global_count = self.count_combobox.get()
         
-        for i in range(12):
+        for i in range(16):
             ip = self.ip_entries[i].get().strip()
             if ip:
                 if not self.is_valid_target(ip):
@@ -213,7 +215,7 @@ class PingToolFrame(ttk.Frame):
         self.after_id = self.after(100, self.check_log_queue)
 
     def ping_worker(self, target, count_str, stop_event):
-        log_dir = "ping_log"
+        log_dir = "LOG/ping_log"
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
 

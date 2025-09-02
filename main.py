@@ -15,8 +15,8 @@ from jietu import BatchScreenshotFrame
 class MainApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("JACK-2025-工具箱")
-        self.geometry("800x600")
+        self.title("Jack-工具-202509")
+        self.geometry("1000x600")
 
         # ----------------------------------------------------
         # 新增：设置窗口图标和任务栏图标
@@ -64,32 +64,51 @@ class MainApp(tk.Tk):
         # ----------------------------------------------------
         self.index_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.index_tab, text="视频流压测")
-        index_app = StressTestFrame(self.index_tab)
-        index_app.pack(fill=tk.BOTH, expand=True)
+        self.index_app = StressTestFrame(self.index_tab)
+        self.index_app.pack(fill=tk.BOTH, expand=True)
 
         # ----------------------------------------------------
         # 2. 添加 RTSP 截图工具标签页
         # ----------------------------------------------------
         self.jietu_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.jietu_tab, text="批量截图")
-        jietu_app = BatchScreenshotFrame(self.jietu_tab)
-        jietu_app.pack(fill=tk.BOTH, expand=True)
+        self.jietu_app = BatchScreenshotFrame(self.jietu_tab)
+        self.jietu_app.pack(fill=tk.BOTH, expand=True)
 
         # ----------------------------------------------------
         # 3. 添加 Ping 工具标签页
         # ----------------------------------------------------
         self.ping_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.ping_tab, text="Ping丢包检测")
-        ping_app = PingToolFrame(self.ping_tab)
-        ping_app.pack(fill=tk.BOTH, expand=True)
+        self.ping_app = PingToolFrame(self.ping_tab)
+        self.ping_app.pack(fill=tk.BOTH, expand=True)
 
         # 绑定窗口关闭事件，确保所有子线程安全退出
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def on_closing(self):
-        # 这是一个退出前的处理示例
-        # 可以在这里调用子模块的停止函数，确保子线程安全退出
-        self.destroy()
+        """
+        窗口关闭时的处理函数，确保所有子线程安全退出
+        """
+        try:
+            # 1. 停止 RTSP 压测模块的所有线程
+            if hasattr(self, 'index_app'):
+                self.index_app.on_closing()
+                
+            # 2. 停止批量截图模块的所有线程  
+            if hasattr(self, 'jietu_app'):
+                self.jietu_app.stop_capture()
+                
+            # 3. 停止 Ping 模块的所有线程
+            if hasattr(self, 'ping_app'):
+                self.ping_app.stop_ping()
+                
+        except Exception as e:
+            print(f"关闭应用时发生错误: {e}")
+        finally:
+            # 强制退出程序，确保所有线程都被终止
+            self.destroy()
+            sys.exit(0)
 
 if __name__ == "__main__":
     app = MainApp()
