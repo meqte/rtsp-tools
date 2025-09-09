@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<XMLConfig>
+    <SplitWindow>16</SplitWindow>
+    <Scale>0</Scale>
+    <Multiple>1</Multiple>
+    <FullScreen>0</FullScreen>
+    <Channel>
+        <CH No="1" URL="rtsp://192.168.0.1/live/1/1" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="2" URL="rtsp://192.168.0.1/live/1/1" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="3" URL="rtsp://192.168.0.1/live/1/1" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="4" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="5" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="6" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="7" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="8" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="9" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="10" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="11" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="12" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="13" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="14" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="15" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+        <CH No="16" URL="rtsp://192.168.0.1/live/1/0" OSD="0" Protocol="1" Cache="1" ShowToolbar="1" AutoPlay="0" />
+    </Channel>
+</XMLConfig>
