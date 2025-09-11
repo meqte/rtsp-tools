@@ -425,7 +425,7 @@ BOOL CDlgRender::OnCommand(WPARAM wParam, LPARAM lParam)
 			for (int i=0; i<1; i++)
 			{
 				memset(sztmp, 0x00, sizeof(sztmp));
-				sprintf(sztmp, "Snapshot/%d.%s", ++iSnapshotTally, wID==POP_MENU_SNAPSHOT_BMP?"bmp":"jpg");
+				sprintf(sztmp, "./%d.%s", ++iSnapshotTally, wID==POP_MENU_SNAPSHOT_BMP?"bmp":"jpg");
 				while (0 != libEasyPlayer_SnapshotToFile(playerHandle, mChannelId, wID==POP_MENU_SNAPSHOT_BMP?0:1, sztmp, 0,1))
 				{
 					Sleep(1);

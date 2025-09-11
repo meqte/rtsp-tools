@@ -258,7 +258,7 @@ void	CDlgVideo::UpdateComponents()
 	if (!bShowToolbar)	return;
 
 	CRect	rcURL;
-	rcURL.SetRect(rcClient.left, rcRender.bottom+2, rcClient.right - 60, rcClient.bottom);
+	rcURL.SetRect(rcClient.left, rcRender.bottom+2, rcClient.right - 65, rcClient.bottom);
 	__MOVE_WINDOW(pEdtURL, rcURL);
 	if (NULL != pEdtURL)		pEdtURL->Invalidate();
 

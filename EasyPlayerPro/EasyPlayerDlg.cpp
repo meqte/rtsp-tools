@@ -309,7 +309,7 @@ void	CLivePlayerDlg::CreateComponents()
 	if (NULL != pChkMultiplex)			pChkMultiplex->SetWindowText(TEXT("复用源"));
 	if (NULL != pChkFullScreen)			pChkFullScreen->SetWindowText(TEXT("全屏"));
 	if (pChkOnlyDecodeKeyframe)		pChkOnlyDecodeKeyframe->SetWindowText(TEXT("仅解码关键帧"));
-	if (pBtnOpenAll)								pBtnOpenAll->SetWindowText(TEXT("启动停止"));
+	if (pBtnOpenAll)								pBtnOpenAll->SetWindowText(TEXT("Play All"));
 
 	if (NULL == pVideoWindow)
 	{
@@ -368,27 +368,27 @@ void	CLivePlayerDlg::UpdateComponents()
 	CRect	rcRenderFormat;
 	rcRenderFormat.SetRect(rcSplitScreen.right+5, rcSplitScreen.top, 
 										rcSplitScreen.right+5+100, rcSplitScreen.bottom);
-	__MOVE_WINDOW(pComboxRenderFormat, rcRenderFormat);
+	//__MOVE_WINDOW(pComboxRenderFormat, rcRenderFormat);
 
 	CRect	rcShownToScale;
 	rcShownToScale.SetRect(rcRenderFormat.right+10, rcRenderFormat.top, 
 										rcRenderFormat.right+10+110, rcRenderFormat.top+30);
-	__MOVE_WINDOW(pChkShownToScale, rcShownToScale);
+	//__MOVE_WINDOW(pChkShownToScale, rcShownToScale);
 
 	CRect	rcMultiplex;
 	rcMultiplex.SetRect(rcShownToScale.right+10, rcShownToScale.top, 
 									rcShownToScale.right+10+70, rcShownToScale.bottom);
-	__MOVE_WINDOW(pChkMultiplex, rcMultiplex);
+	//__MOVE_WINDOW(pChkMultiplex, rcMultiplex);
 
 	CRect	rcFullScreen;
 	rcFullScreen.SetRect(rcMultiplex.right+10, rcMultiplex.top, 
 									rcMultiplex.right+10+70, rcMultiplex.bottom);
-	__MOVE_WINDOW(pChkFullScreen, rcFullScreen);
+	//__MOVE_WINDOW(pChkFullScreen, rcFullScreen);
 
 	CRect	rcDecodeKeyFrame;
 	rcDecodeKeyFrame.SetRect(rcFullScreen.right+10, rcFullScreen.top, 
 									rcFullScreen.right+10+120, rcFullScreen.bottom);
-	__MOVE_WINDOW(pChkOnlyDecodeKeyframe, rcDecodeKeyFrame);
+	//__MOVE_WINDOW(pChkOnlyDecodeKeyframe, rcDecodeKeyFrame);
 
 
 	CRect	rcCopyright;
@@ -397,8 +397,11 @@ void	CLivePlayerDlg::UpdateComponents()
 	__MOVE_WINDOW(pStaticCopyright, rcCopyright);
 
 	CRect	rcOpenAll;
-	rcOpenAll.SetRect(rcCopyright.left-80-10, rcFullScreen.top, 
-									rcCopyright.left-10, rcFullScreen.bottom-5);
+	int btnWidth = 120;
+	int margin = 10;
+	// Position the Open All button flush to the right edge of the client area
+	rcOpenAll.SetRect(rcClient.right - btnWidth - margin, rcFullScreen.top,
+					rcClient.right - margin, rcFullScreen.bottom - 5);
 	__MOVE_WINDOW(pBtnOpenAll, rcOpenAll);
 }
 void	CLivePlayerDlg::DeleteComponents()
