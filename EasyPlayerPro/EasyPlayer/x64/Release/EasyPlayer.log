@@ -1,0 +1,12 @@
+﻿  EasyPlayerDlg.cpp
+C:\Users\Administrator\Downloads\EasyPlayerPro\EasyPlayerDlg.cpp(191,13): warning C4996: 'localtime': This function or variable may be unsafe. Consider using localtime_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+  (编译源文件“/EasyPlayerDlg.cpp”)
+  
+C:\Users\Administrator\Downloads\EasyPlayerPro\EasyPlayerDlg.cpp(197,2): warning C4996: 'sprintf': This function or variable may be unsafe. Consider using sprintf_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+  (编译源文件“/EasyPlayerDlg.cpp”)
+  
+  正在生成代码
+  Previous IPDB and IOBJ mismatch, fall back to full compilation.
+  All 549 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
+  已完成代码的生成
+  EasyPlayer.vcxproj -> C:\Users\Administrator\Downloads\EasyPlayerPro\x64\Release\EasyPlayer.exe

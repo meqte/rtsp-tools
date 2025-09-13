@@ -368,27 +368,27 @@ void	CLivePlayerDlg::UpdateComponents()
 	CRect	rcRenderFormat;
 	rcRenderFormat.SetRect(rcSplitScreen.right+5, rcSplitScreen.top, 
 										rcSplitScreen.right+5+100, rcSplitScreen.bottom);
-	//__MOVE_WINDOW(pComboxRenderFormat, rcRenderFormat);
+	__MOVE_WINDOW(pComboxRenderFormat, rcRenderFormat);
 
 	CRect	rcShownToScale;
 	rcShownToScale.SetRect(rcRenderFormat.right+10, rcRenderFormat.top, 
 										rcRenderFormat.right+10+110, rcRenderFormat.top+30);
-	//__MOVE_WINDOW(pChkShownToScale, rcShownToScale);
+	__MOVE_WINDOW(pChkShownToScale, rcShownToScale);
 
 	CRect	rcMultiplex;
 	rcMultiplex.SetRect(rcShownToScale.right+10, rcShownToScale.top, 
 									rcShownToScale.right+10+70, rcShownToScale.bottom);
-	//__MOVE_WINDOW(pChkMultiplex, rcMultiplex);
+	__MOVE_WINDOW(pChkMultiplex, rcMultiplex);
 
 	CRect	rcFullScreen;
 	rcFullScreen.SetRect(rcMultiplex.right+10, rcMultiplex.top, 
 									rcMultiplex.right+10+70, rcMultiplex.bottom);
-	//__MOVE_WINDOW(pChkFullScreen, rcFullScreen);
+	__MOVE_WINDOW(pChkFullScreen, rcFullScreen);
 
 	CRect	rcDecodeKeyFrame;
 	rcDecodeKeyFrame.SetRect(rcFullScreen.right+10, rcFullScreen.top, 
 									rcFullScreen.right+10+120, rcFullScreen.bottom);
-	//__MOVE_WINDOW(pChkOnlyDecodeKeyframe, rcDecodeKeyFrame);
+	__MOVE_WINDOW(pChkOnlyDecodeKeyframe, rcDecodeKeyFrame);
 
 
 	CRect	rcCopyright;
