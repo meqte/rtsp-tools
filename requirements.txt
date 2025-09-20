@@ -1,0 +1,20 @@
+# 项目依赖包列表
+# 使用 pip install -r requirements.txt 进行批量安装
+
+# GUI库 (Python标准库，无需安装)
+# tkinter
+
+# 图像处理库
+Pillow>=8.0.0
+
+# 视频处理库
+av>=8.0.0
+
+# 系统信息库
+psutil>=5.8.0
+
+# 数值计算库
+numpy>=1.19.0
+
+# Windows注册表操作 (仅Windows系统需要)
+# pywin32>=227  # 通常在Windows系统上已预装，如果未安装可取消注释此行
