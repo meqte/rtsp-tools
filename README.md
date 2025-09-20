@@ -165,7 +165,13 @@ pyinstaller --upx-dir "d:\upx" --onefile --noconsole --name "JACK-2025-工具箱
 
 使用NUitka打包
 
-python -m nuitka --onefile --standalone --enable-plugin=tk-inter --windows-console-mode=disable --windows-icon-from-ico="tmp/ico.ico" main.py
+pip install --upgrade nuitka
+
+
+
+python -m nuitka --onefile --standalone --enable-plugin=tk-inter --windows-console-mode=disable --windows-icon-from-ico="tmp/ico.ico" --windows-file-version="2025.10.0" --windows-product-version="2025.10.0" --windows-file-description="Jack专用RTSP工具" --windows-product-name="Mr.Jack" --windows-company-name="Mr.Jack" --copyright="© 2025 Mr.Jack版权所有" --output-filename="Mr_Jack.exe" main.py
+
+-------------------------------------------------------------------------------
 
 -------------------------------------------------------------------------------
 
