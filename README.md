@@ -163,13 +163,30 @@ pyinstaller --upx-dir "d:\upx" --onefile --noconsole --name "JACK-2025-工具箱
 
 -----------------------------------------------
 
-使用NUitka打包
+在虚拟环境中使用NUitka打包
+
+虚拟环境打包：
+运行以下命令来创建一个名为 venv 的虚拟环境：
+
+python -m venv venv
+
+运行以下命令来激活它：
+
+venv\Scripts\activate
+
+如果成功，你的命令行提示符前面会出现 (venv)，像这样：
+
+(venv) D:\github\rtsp-tools>
+
+激活虚拟环境后，现在需要安装你的项目所依赖的所有库。通常，这些依赖都列在 requirements.txt 文件中。
+
+pip install -r requirements.txt
 
 pip install --upgrade nuitka
 
 
 
-python -m nuitka --onefile --standalone --enable-plugin=tk-inter --windows-console-mode=disable --windows-icon-from-ico="tmp/ico.ico" --windows-file-version="2025.10.0" --windows-product-version="2025.10.0" --windows-file-description="Jack专用RTSP工具" --windows-product-name="Mr.Jack" --windows-company-name="Mr.Jack" --copyright="© 2025 Mr.Jack版权所有" --output-filename="Mr_Jack.exe" main.py
+python -m nuitka --onefile --standalone --enable-plugin=tk-inter --enable-plugin=upx --lto=yes --windows-console-mode=disable --windows-icon-from-ico="tmp/ico.ico" --windows-file-version="2025.10.0" --windows-product-version="2025.10.0" --windows-file-description="Jack专用RTSP工具" --windows-product-name="Mr.Jack" --windows-company-name="Mr.Jack" --copyright="© 2025 Mr.Jack版权所有" --output-filename="Mr_Jack.exe" --remove-output main.py
 
 -------------------------------------------------------------------------------
 
