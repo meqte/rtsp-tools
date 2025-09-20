@@ -137,6 +137,39 @@ pyinstaller --onefile --noconsole --name "PingTool" --icon "your_icon.ico" main.
 
 pyinstaller --onefile --noconsole --name "JACK-2025-工具箱" --icon "tmp/ico.ico" --add-data "tmp;tmp" main.py
 
+压缩打包：
+pyinstaller --upx-dir "d:\upx" --onefile --noconsole --name "JACK-2025-工具箱" --icon "tmp/ico.ico" --add-data "tmp;tmp" main.py
+-----------------
+虚拟环境打包：
+运行以下命令来创建一个名为 venv 的虚拟环境：
+
+python -m venv venv
+
+运行以下命令来激活它：
+
+venv\Scripts\activate
+
+如果成功，你的命令行提示符前面会出现 (venv)，像这样：
+
+(venv) D:\github\rtsp-tools>
+
+激活虚拟环境后，现在需要安装你的项目所依赖的所有库。通常，这些依赖都列在 requirements.txt 文件中。
+
+pip install -r requirements.txt
+
+打包命令：
+pyinstaller --upx-dir "d:\upx" --onefile --noconsole --name "JACK-2025-工具箱" --icon "tmp/ico.ico" --add-data "tmp;tmp" main.py
+
+
+-----------------------------------------------
+
+使用NUitka打包
+
+python -m nuitka --onefile --standalone --enable-plugin=tk-inter --windows-console-mode=disable --windows-icon-from-ico="tmp/ico.ico" main.py
+
+-------------------------------------------------------------------------------
+
+
 命令参数详解：
 
 --onefile: 将所有文件打包成一个独立的 .exe 文件。
